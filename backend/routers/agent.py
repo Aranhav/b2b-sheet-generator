@@ -9,6 +9,7 @@ Endpoints:
   POST   /api/agent/drafts/{id}/approve  Push to Xindus API
   POST   /api/agent/drafts/{id}/archive Archive a draft
   POST   /api/agent/drafts/{id}/delete  Permanently delete a draft
+  POST   /api/agent/drafts/{id}/re-extract  Re-run extraction on draft files
   DELETE /api/agent/drafts/{id}        Soft-delete (reject) draft
 """
 from __future__ import annotations
@@ -736,6 +737,106 @@ async def permanently_delete_draft(draft_id: UUID):
         raise HTTPException(400, f"Cannot delete draft with status '{draft['status']}'")
     await db.delete_draft_permanent(draft_id)
     return {"success": True, "message": "Draft permanently deleted"}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/agent/drafts/{draft_id}/re-extract
+# ---------------------------------------------------------------------------
+
+
+@router.post("/drafts/{draft_id}/re-extract", response_model=DraftDetail)
+async def re_extract_draft(draft_id: UUID):
+    """Re-run extraction on all files linked to a draft and rebuild shipment data."""
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft["status"] != "pending_review":
+        raise HTTPException(400, f"Draft is '{draft['status']}', must be 'pending_review' to re-extract")
+
+    files = await db.get_draft_files(draft_id)
+    if not files:
+        raise HTTPException(400, "No files linked to this draft")
+
+    from backend.services.llm_extractor import _extract_invoice, _extract_packing_list
+    from backend.services.learning import build_extraction_hint
+    from backend.services.seller_intelligence import apply_seller_defaults
+
+    # Build correction hints scoped to seller if available
+    seller_id = draft.get("seller_id")
+    try:
+        correction_hints = await build_extraction_hint(seller_id=seller_id)
+    except Exception:
+        logger.warning("Failed to build extraction hints for re-extract", exc_info=True)
+        correction_hints = ""
+
+    extracted_files: list[dict[str, Any]] = []
+
+    for f in files:
+        # Download file from storage
+        s3_key = f"uploads/{f['batch_id']}/{f['filename']}"
+        try:
+            file_bytes = await storage.download_file(s3_key)
+        except Exception:
+            logger.exception("Failed to download file %s for re-extract", f["filename"])
+            raise HTTPException(500, f"Failed to download file: {f['filename']}")
+
+        # Process PDF
+        pdf_result = await asyncio.to_thread(process_pdf, file_bytes)
+        pages = pdf_result.get("pages", [])
+        is_vision = any(p.get("image_bytes") for p in pages)
+
+        # Classify
+        classification = await classify_document(pages, is_vision=is_vision)
+        file_type = classification["document_type"]
+
+        # Extract based on type
+        try:
+            if file_type == "invoice":
+                raw_data = await _extract_invoice(pages, is_vision, correction_hints=correction_hints)
+            elif file_type == "packing_list":
+                raw_data = await _extract_packing_list(pages, is_vision, correction_hints=correction_hints)
+            else:
+                raw_data = await _extract_invoice(pages, is_vision, correction_hints=correction_hints)
+        except Exception:
+            logger.exception("Re-extraction failed for %s", f["filename"])
+            raw_data = {}
+
+        confidence = _estimate_confidence(raw_data, file_type)
+
+        # Update file record
+        await db.update_file_extraction(
+            f["id"],
+            file_type=file_type,
+            page_count=len(pages),
+            extracted_data=raw_data,
+            confidence=confidence,
+        )
+
+        extracted_files.append({
+            "id": f["id"],
+            "file_type": file_type,
+            "extracted_data": raw_data,
+        })
+
+    # Build merged shipment data
+    shipment_data, confidence_scores = build_draft_shipment(extracted_files)
+
+    # Re-apply seller defaults
+    if seller_id:
+        try:
+            seller = await db.get_seller(seller_id)
+            if seller:
+                seller_defaults = _parse_jsonb(seller.get("defaults"))
+                shipper_addr = _parse_jsonb(seller.get("shipper_address"))
+                if seller_defaults:
+                    shipment_data = apply_seller_defaults(shipment_data, seller_defaults, shipper_addr)
+        except Exception:
+            logger.warning("Failed to apply seller defaults during re-extract", exc_info=True)
+
+    # Save rebuilt data (clears corrected_data)
+    await db.update_draft_shipment_data(draft_id, shipment_data, confidence_scores)
+
+    return await get_draft(draft_id)
 
 
 # ---------------------------------------------------------------------------

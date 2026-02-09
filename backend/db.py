@@ -428,6 +428,26 @@ async def update_draft_seller(draft_id: UUID, seller_id: UUID | None) -> None:
     )
 
 
+async def update_draft_shipment_data(
+    draft_id: UUID,
+    shipment_data: dict[str, Any],
+    confidence_scores: dict[str, Any] | None = None,
+) -> None:
+    """Replace shipment_data, clear corrected_data, and optionally update confidence."""
+    pool = get_pool()
+    await pool.execute(
+        """UPDATE draft_shipments
+           SET shipment_data = $2::jsonb,
+               corrected_data = NULL,
+               confidence_scores = COALESCE($3::jsonb, confidence_scores),
+               reviewed_at = NOW()
+           WHERE id = $1""",
+        draft_id,
+        json.dumps(shipment_data),
+        json.dumps(confidence_scores) if confidence_scores else None,
+    )
+
+
 async def update_draft_pushed(draft_id: UUID, scancode: str) -> None:
     pool = get_pool()
     await pool.execute(
