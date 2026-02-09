@@ -446,7 +446,8 @@ async def list_drafts(
 
     drafts = []
     for d in drafts_raw:
-        sd = d.get("shipment_data") or {}
+        # Use corrected_data if available, fall back to shipment_data
+        sd = _parse_jsonb(d.get("corrected_data")) or d.get("shipment_data") or {}
         if isinstance(sd, str):
             sd = json.loads(sd)
 
@@ -490,7 +491,8 @@ async def get_batch(batch_id: UUID):
     # Build draft summaries
     drafts = []
     for d in drafts_raw:
-        sd = d.get("shipment_data") or {}
+        # Use corrected_data if available, fall back to shipment_data
+        sd = _parse_jsonb(d.get("corrected_data")) or d.get("shipment_data") or {}
         if isinstance(sd, str):
             sd = json.loads(sd)
 
