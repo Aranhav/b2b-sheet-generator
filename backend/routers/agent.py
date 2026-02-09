@@ -954,6 +954,164 @@ async def download_draft_file(draft_id: UUID, file_id: UUID):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/agent/drafts/{draft_id}/download
+# ---------------------------------------------------------------------------
+
+
+@router.get("/drafts/{draft_id}/download")
+async def download_draft_excel(draft_id: UUID):
+    """Download the draft shipment data as an Excel workbook."""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+
+    data = draft.get("corrected_data") or draft.get("shipment_data")
+    if not data:
+        raise HTTPException(400, "No shipment data in draft")
+
+    # --- Styling constants ---
+    hdr_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    hdr_font = Font(bold=True, color="FFFFFF", size=10)
+    data_font = Font(size=10)
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    wrap = Alignment(wrap_text=True, vertical="top")
+
+    wb = Workbook()
+
+    # ---- Sheet 1: Shipment Info ----
+    ws = wb.active
+    ws.title = "Shipment"
+    info_fields = [
+        ("Invoice Number", data.get("invoice_number", "")),
+        ("Invoice Date", data.get("invoice_date", "")),
+        ("Shipping Method", data.get("shipping_method", "")),
+        ("Terms of Trade", data.get("terms_of_trade", "")),
+        ("Tax Type", data.get("tax_type", "")),
+        ("Origin Clearance", data.get("origin_clearance_type", "")),
+        ("Destination Clearance", data.get("destination_clearance_type", "")),
+        ("Country", data.get("country", "")),
+        ("Port of Entry", data.get("port_of_entry", "")),
+        ("Destination CHA", data.get("destination_cha", "")),
+        ("Purpose", data.get("purpose_of_booking", "")),
+        ("Export Reference", data.get("export_reference", "")),
+    ]
+    # Write addresses as info rows too
+    for label, addr_key in [
+        ("Shipper", "shipper_address"),
+        ("Receiver", "receiver_address"),
+        ("Billing", "billing_address"),
+        ("IOR", "ior_address"),
+    ]:
+        addr = data.get(addr_key, {}) or {}
+        parts = [addr.get("name", ""), addr.get("address", ""),
+                 addr.get("city", ""), addr.get("state", ""),
+                 addr.get("zip", ""), addr.get("country", "")]
+        info_fields.append((f"{label} Address", ", ".join(p for p in parts if p)))
+        if addr.get("phone"):
+            info_fields.append((f"{label} Phone", addr["phone"]))
+        if addr.get("email"):
+            info_fields.append((f"{label} Email", addr["email"]))
+
+    for i, (label, value) in enumerate(info_fields, start=1):
+        lc = ws.cell(row=i, column=1, value=label)
+        lc.font = Font(bold=True, size=10)
+        lc.border = thin_border
+        vc = ws.cell(row=i, column=2, value=str(value) if value else "")
+        vc.font = data_font
+        vc.border = thin_border
+        vc.alignment = wrap
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 60
+
+    # ---- Sheet 2: Boxes & Items ----
+    ws2 = wb.create_sheet("Boxes & Items")
+    box_headers = [
+        "Box #", "Length", "Width", "Height", "Weight (kg)", "UOM",
+        "Battery", "Receiver Name", "Receiver City", "Receiver Country",
+        "Item Description", "Qty", "Unit Price", "Total Price",
+        "Export HSN", "Import HSN", "Origin", "FOB Value", "IGST %", "Category",
+    ]
+    for ci, h in enumerate(box_headers, start=1):
+        c = ws2.cell(row=1, column=ci, value=h)
+        c.fill = hdr_fill
+        c.font = hdr_font
+        c.border = thin_border
+        c.alignment = Alignment(horizontal="center")
+
+    row = 2
+    boxes = data.get("shipment_boxes", []) or []
+    for box in boxes:
+        items = box.get("shipment_box_items", []) or [{}]
+        recv = box.get("receiver_address", {}) or {}
+        for j, item in enumerate(items):
+            is_first = j == 0
+            ws2.cell(row=row, column=1, value=box.get("box_id", "") if is_first else "").border = thin_border
+            ws2.cell(row=row, column=2, value=box.get("length", 0) if is_first else "").border = thin_border
+            ws2.cell(row=row, column=3, value=box.get("width", 0) if is_first else "").border = thin_border
+            ws2.cell(row=row, column=4, value=box.get("height", 0) if is_first else "").border = thin_border
+            ws2.cell(row=row, column=5, value=box.get("weight", 0) if is_first else "").border = thin_border
+            ws2.cell(row=row, column=6, value=box.get("uom", "cm") if is_first else "").border = thin_border
+            ws2.cell(row=row, column=7, value="Yes" if box.get("has_battery") else "No" if is_first else "").border = thin_border
+            ws2.cell(row=row, column=8, value=recv.get("name", "") if is_first else "").border = thin_border
+            ws2.cell(row=row, column=9, value=recv.get("city", "") if is_first else "").border = thin_border
+            ws2.cell(row=row, column=10, value=recv.get("country", "") if is_first else "").border = thin_border
+            ws2.cell(row=row, column=11, value=item.get("description", "")).border = thin_border
+            ws2.cell(row=row, column=12, value=item.get("quantity", "")).border = thin_border
+            ws2.cell(row=row, column=13, value=item.get("unit_price", "")).border = thin_border
+            ws2.cell(row=row, column=14, value=item.get("total_price", "")).border = thin_border
+            ws2.cell(row=row, column=15, value=item.get("ehsn", "")).border = thin_border
+            ws2.cell(row=row, column=16, value=item.get("ihsn", "")).border = thin_border
+            ws2.cell(row=row, column=17, value=item.get("country_of_origin", "")).border = thin_border
+            ws2.cell(row=row, column=18, value=item.get("unit_fob_value", "")).border = thin_border
+            ws2.cell(row=row, column=19, value=item.get("igst_amount", "")).border = thin_border
+            ws2.cell(row=row, column=20, value=item.get("category", "")).border = thin_border
+            row += 1
+
+    for ci in range(1, 21):
+        ws2.column_dimensions[chr(64 + ci) if ci <= 26 else ""].width = 14
+    ws2.column_dimensions["A"].width = 8
+    ws2.column_dimensions["K"].width = 30
+
+    # ---- Sheet 3: Product Details (customs) ----
+    ws3 = wb.create_sheet("Product Details")
+    pd_headers = ["Description", "HSN Code", "Value"]
+    for ci, h in enumerate(pd_headers, start=1):
+        c = ws3.cell(row=1, column=ci, value=h)
+        c.fill = hdr_fill
+        c.font = hdr_font
+        c.border = thin_border
+    for pi, pd in enumerate(data.get("product_details", []) or [], start=2):
+        ws3.cell(row=pi, column=1, value=pd.get("product_description", "")).border = thin_border
+        ws3.cell(row=pi, column=2, value=pd.get("hsn_code", "")).border = thin_border
+        ws3.cell(row=pi, column=3, value=pd.get("value", "")).border = thin_border
+    ws3.column_dimensions["A"].width = 40
+    ws3.column_dimensions["B"].width = 14
+    ws3.column_dimensions["C"].width = 14
+
+    # ---- Save to bytes ----
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    inv = data.get("invoice_number", str(draft_id)[:8])
+    safe_inv = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(inv))
+    filename = f"draft_{safe_inv}.xlsx"
+
+    return FastAPIResponse(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/agent/shipping-methods
 # ---------------------------------------------------------------------------
 
