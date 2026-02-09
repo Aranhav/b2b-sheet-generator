@@ -7,6 +7,7 @@ per-field confidence scores.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,76 @@ def _check_multi_address(boxes: list[dict[str, Any]]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Smart defaults: marketplace detection & baseline config
+# ---------------------------------------------------------------------------
+
+# Amazon FBA warehouse code patterns (common US/EU fulfillment center prefixes)
+_FBA_PATTERNS = re.compile(
+    r"(?:FBA[:\s#]|Amazon\s+Fulfillment|AMZN|"
+    r"\b[A-Z]{3}\d{1,2}\b)",  # e.g. BFI4, PHX6, EWR9
+    re.IGNORECASE,
+)
+
+
+def _detect_marketplace(
+    receiver_address: dict[str, Any],
+) -> tuple[str, bool]:
+    """Detect marketplace and FBA status from receiver name/address.
+
+    Returns (marketplace, is_fba).
+    """
+    name = (receiver_address.get("name") or "").lower()
+    addr = (receiver_address.get("address") or "").lower()
+    combined = f"{name} {addr}"
+
+    # Amazon detection
+    if "amazon" in combined or "amzn" in combined or "fba" in combined:
+        is_fba = bool(_FBA_PATTERNS.search(combined))
+        return ("AMAZON_FBA" if is_fba else "AMAZON"), is_fba
+
+    # Walmart detection
+    if "walmart" in combined or "wfs" in combined:
+        is_wfs = "wfs" in combined
+        return ("WALMART_WFS" if is_wfs else "WALMART"), False
+
+    # Faire detection
+    if "faire" in combined:
+        return "FAIRE", False
+
+    return "", False
+
+
+def _apply_smart_defaults(shipment_data: dict[str, Any]) -> dict[str, Any]:
+    """Apply smart baseline defaults to shipment config fields.
+
+    These are statistical-best-guess defaults for B2B shipments.
+    Seller-specific defaults (applied later) will override these.
+    """
+    # Always Commercial for B2B origin clearance
+    shipment_data["origin_clearance_type"] = "Commercial"
+
+    # DDP is used in ~98% of B2B orders
+    if not shipment_data.get("terms_of_trade"):
+        shipment_data["terms_of_trade"] = "DDP"
+
+    # Sold is the dominant purpose for B2B
+    if not shipment_data.get("purpose_of_booking"):
+        shipment_data["purpose_of_booking"] = "Sold"
+
+    # Auto-detect marketplace from receiver info
+    receiver = shipment_data.get("receiver_address") or {}
+    marketplace, is_fba = _detect_marketplace(receiver)
+
+    if marketplace and not shipment_data.get("marketplace"):
+        shipment_data["marketplace"] = marketplace
+
+    if is_fba:
+        shipment_data["amazon_fba"] = True
+
+    return shipment_data
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -380,6 +451,10 @@ def build_draft_shipment(
         "total_gross_weight_kg": _cv_float(packing_data, "total_gross_weight_kg") or 0,
         "total_net_weight_kg": _cv_float(packing_data, "total_net_weight_kg") or 0,
     }
+
+    # Apply smart baseline defaults (marketplace detection, standard B2B config)
+    # These run BEFORE seller defaults, which override in agent.py
+    _apply_smart_defaults(shipment_data)
 
     # Build confidence map
     confidence_scores = {
