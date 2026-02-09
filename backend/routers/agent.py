@@ -21,6 +21,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import Response as FastAPIResponse
 from sse_starlette.sse import EventSourceResponse
 
 from backend import db, storage
@@ -837,6 +838,130 @@ async def re_extract_draft(draft_id: UUID):
     await db.update_draft_shipment_data(draft_id, shipment_data, confidence_scores)
 
     return await get_draft(draft_id)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/agent/drafts/{draft_id}/files  (add files to draft)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/drafts/{draft_id}/files", response_model=DraftDetail)
+async def add_files_to_draft(draft_id: UUID, files: list[UploadFile] = File(...)):
+    """Upload new files to an existing draft, then re-extract."""
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft["status"] != "pending_review":
+        raise HTTPException(400, f"Draft is '{draft['status']}', must be 'pending_review' to add files")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+
+    batch_id = draft["batch_id"]
+
+    # Validate and upload each file
+    new_file_ids: list[UUID] = []
+    for f in files:
+        ext = "." + f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(400, f"Unsupported file type: {f.filename}")
+
+        content = await f.read()
+        if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
+            raise HTTPException(400, f"File too large: {f.filename} (max {MAX_FILE_SIZE_MB}MB)")
+
+        s3_key = f"uploads/{batch_id}/{f.filename}"
+        file_url = await storage.upload_file(s3_key, content)
+        file_id = await db.create_file(batch_id, f.filename, file_url)
+        new_file_ids.append(file_id)
+
+    # Link new files to draft
+    await db.link_files_to_draft(draft_id, new_file_ids)
+
+    # Increment batch file_count
+    pool = db.get_pool()
+    await pool.execute(
+        "UPDATE upload_batches SET file_count = file_count + $2 WHERE id = $1",
+        batch_id, len(new_file_ids),
+    )
+
+    # Re-extract with all files (existing + new)
+    return await re_extract_draft(draft_id)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/agent/drafts/{draft_id}/files/{file_id}  (remove file from draft)
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/drafts/{draft_id}/files/{file_id}", response_model=DraftDetail)
+async def remove_file_from_draft(draft_id: UUID, file_id: UUID):
+    """Remove a file from a draft (unlink only), then re-extract."""
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+    if draft["status"] != "pending_review":
+        raise HTTPException(400, f"Draft is '{draft['status']}', must be 'pending_review' to remove files")
+
+    file_record = await db.get_file(file_id)
+    if not file_record:
+        raise HTTPException(404, "File not found")
+
+    linked_ids = await db.get_draft_file_ids(draft_id)
+    if file_id not in linked_ids:
+        raise HTTPException(400, "File is not linked to this draft")
+    if len(linked_ids) <= 1:
+        raise HTTPException(400, "Cannot remove the last file from a draft")
+
+    await db.unlink_file_from_draft(draft_id, file_id)
+
+    # Re-extract with remaining files
+    return await re_extract_draft(draft_id)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/agent/drafts/{draft_id}/files/{file_id}/download
+# ---------------------------------------------------------------------------
+
+
+@router.get("/drafts/{draft_id}/files/{file_id}/download")
+async def download_draft_file(draft_id: UUID, file_id: UUID):
+    """Download the original PDF for a file linked to a draft."""
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+
+    file_record = await db.get_file(file_id)
+    if not file_record:
+        raise HTTPException(404, "File not found")
+
+    linked_ids = await db.get_draft_file_ids(draft_id)
+    if file_id not in linked_ids:
+        raise HTTPException(400, "File is not linked to this draft")
+
+    s3_key = f"uploads/{file_record['batch_id']}/{file_record['filename']}"
+    try:
+        file_bytes = await storage.download_file(s3_key)
+    except Exception:
+        logger.exception("Failed to download file %s", file_record["filename"])
+        raise HTTPException(500, f"Failed to download file: {file_record['filename']}")
+
+    filename = file_record["filename"]
+    return FastAPIResponse(
+        content=file_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/agent/shipping-methods
+# ---------------------------------------------------------------------------
+
+
+@router.get("/shipping-methods")
+async def list_shipping_methods(b2b: bool = True):
+    methods = await db.get_shipping_methods(b2b_only=b2b)
+    return methods
 
 
 # ---------------------------------------------------------------------------

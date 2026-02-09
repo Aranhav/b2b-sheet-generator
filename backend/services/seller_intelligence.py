@@ -26,7 +26,6 @@ _DEFAULT_FIELDS: list[str] = [
     "terms_of_trade",
     "purpose_of_booking",
     "tax_type",
-    "exporter_category",
     "shipping_currency",
     "billing_currency",
     "amazon_fba",

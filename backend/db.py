@@ -115,6 +115,18 @@ EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE upload_batches ADD COLUMN step_progress JSONB DEFAULT '{}'::jsonb;
 EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+-- Shipping methods lookup table
+CREATE TABLE IF NOT EXISTS shipping_methods (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  is_b2b BOOLEAN NOT NULL DEFAULT false,
+  active BOOLEAN NOT NULL DEFAULT true
+);
+
+INSERT INTO shipping_methods (code, name, is_b2b, active) VALUES
+  ('AN', 'Xindus B2B Express', true, true)
+ON CONFLICT (code) DO NOTHING;
 """
 
 # ---------------------------------------------------------------------------
@@ -317,6 +329,20 @@ async def get_files_for_batch(batch_id: UUID) -> list[dict[str, Any]]:
         batch_id,
     )
     return [dict(r) for r in rows]
+
+
+async def get_file(file_id: UUID) -> dict[str, Any] | None:
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT * FROM uploaded_files WHERE id = $1", file_id)
+    return dict(row) if row else None
+
+
+async def unlink_file_from_draft(draft_id: UUID, file_id: UUID) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "DELETE FROM draft_shipment_files WHERE draft_id = $1 AND file_id = $2",
+        draft_id, file_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -698,3 +724,21 @@ async def increment_seller_shipment_count(seller_id: UUID) -> None:
            WHERE id = $1""",
         seller_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Shipping methods
+# ---------------------------------------------------------------------------
+
+
+async def get_shipping_methods(b2b_only: bool = False) -> list[dict]:
+    pool = get_pool()
+    if b2b_only:
+        rows = await pool.fetch(
+            "SELECT code, name FROM shipping_methods WHERE active = true AND is_b2b = true ORDER BY name"
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT code, name FROM shipping_methods WHERE active = true ORDER BY name"
+        )
+    return [dict(r) for r in rows]
