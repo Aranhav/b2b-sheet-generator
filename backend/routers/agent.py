@@ -959,11 +959,16 @@ async def download_draft_file(draft_id: UUID, file_id: UUID):
 
 
 @router.get("/drafts/{draft_id}/download")
-async def download_draft_excel(draft_id: UUID):
-    """Download the draft shipment data as an Excel workbook."""
+async def download_draft_excel(draft_id: UUID, format: str = "summary"):
+    """Download the draft shipment data as an Excel workbook.
+
+    Query params:
+        format: "summary" (default, 3-sheet overview) or "xpressb2b" (21-col upload sheet)
+    """
     from io import BytesIO
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
 
     draft = await db.get_draft(draft_id)
     if not draft:
@@ -973,9 +978,13 @@ async def download_draft_excel(draft_id: UUID):
     if not data:
         raise HTTPException(400, "No shipment data in draft")
 
-    # --- Styling constants ---
-    hdr_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    hdr_font = Font(bold=True, color="FFFFFF", size=10)
+    inv = data.get("invoice_number", str(draft_id)[:8])
+    safe_inv = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(inv))
+
+    # --- Shared styling ---
+    hdr_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     data_font = Font(size=10)
     thin_border = Border(
         left=Side(style="thin"), right=Side(style="thin"),
@@ -983,6 +992,127 @@ async def download_draft_excel(draft_id: UUID):
     )
     wrap = Alignment(wrap_text=True, vertical="top")
 
+    def _auto_fit(ws, min_w=10, max_w=40):
+        for ci in range(1, ws.max_column + 1):
+            mx = 0
+            for row in ws.iter_rows(min_col=ci, max_col=ci, values_only=False):
+                for cell in row:
+                    if cell.value is not None:
+                        mx = max(mx, len(str(cell.value)))
+            ws.column_dimensions[get_column_letter(ci)].width = min(max(mx + 2, min_w), max_w)
+
+    boxes = data.get("shipment_boxes", []) or []
+
+    # =====================================================================
+    # FORMAT: XpressB2B Multi Address (exact 21-column Xindus upload sheet)
+    # =====================================================================
+    if format == "xpressb2b":
+        COLUMNS = [
+            "Box Number",
+            "Receiver Name",
+            "Receiver Address",
+            "Receiver City",
+            "Receiver Zip",
+            "Receiver State",
+            "Receiver Country",
+            "Receiver Phone Number",
+            "Receiver Extension No",
+            "Receiver Email",
+            "Box Length (cms)",
+            "Box Width (cms)",
+            "Box Height (cms)",
+            "Box Weight (kgs)",
+            "Item Description",
+            "Item Qty",
+            "Item Unit Weight Kg",
+            "HS Code (Origin)",
+            "HS Code (Destination)",
+            "Item Unit Price",
+            "IGST % (For GST taxtype)",
+        ]
+        BOX_COL_COUNT = 14  # cols 1-14 are box-level (only on first item row)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "XpressB2B Multi Address"
+
+        # Header row
+        for ci, h in enumerate(COLUMNS, start=1):
+            c = ws.cell(row=1, column=ci, value=h)
+            c.fill = hdr_fill
+            c.font = hdr_font
+            c.alignment = hdr_align
+            c.border = thin_border
+
+        # Fallback receiver from top-level
+        top_recv = data.get("receiver_address", {}) or {}
+
+        current_row = 2
+        for box in boxes:
+            items = box.get("shipment_box_items", []) or [{}]
+            recv = box.get("receiver_address", {}) or {}
+            # Use box receiver if it has a name, else fallback to top-level
+            if not recv.get("name"):
+                recv = top_recv
+
+            for j, item in enumerate(items):
+                is_first = j == 0
+
+                if is_first:
+                    row_data = [
+                        box.get("box_id", ""),
+                        recv.get("name", ""),
+                        recv.get("address", ""),
+                        recv.get("city", ""),
+                        recv.get("zip", ""),
+                        recv.get("state", ""),
+                        recv.get("country", ""),
+                        recv.get("phone", ""),
+                        recv.get("extension_number", ""),
+                        recv.get("email", ""),
+                        box.get("length", ""),
+                        box.get("width", ""),
+                        box.get("height", ""),
+                        box.get("weight", ""),
+                    ]
+                else:
+                    row_data = [""] * BOX_COL_COUNT
+
+                # Item-level columns (15-21)
+                row_data.extend([
+                    item.get("description", ""),
+                    item.get("quantity", ""),
+                    item.get("weight", ""),
+                    item.get("ehsn", ""),
+                    item.get("ihsn", ""),
+                    item.get("unit_price", ""),
+                    item.get("igst_amount", ""),
+                ])
+
+                for ci, val in enumerate(row_data, start=1):
+                    cell = ws.cell(row=current_row, column=ci, value=val if val else "")
+                    cell.border = thin_border
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+                current_row += 1
+
+        _auto_fit(ws)
+        ws.freeze_panes = "A2"
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        filename = f"XpressB2B_{safe_inv}.xlsx"
+
+        return FastAPIResponse(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # =====================================================================
+    # FORMAT: Summary (default 3-sheet overview)
+    # =====================================================================
     wb = Workbook()
 
     # ---- Sheet 1: Shipment Info ----
@@ -1002,7 +1132,6 @@ async def download_draft_excel(draft_id: UUID):
         ("Purpose", data.get("purpose_of_booking", "")),
         ("Export Reference", data.get("export_reference", "")),
     ]
-    # Write addresses as info rows too
     for label, addr_key in [
         ("Shipper", "shipper_address"),
         ("Receiver", "receiver_address"),
@@ -1046,7 +1175,6 @@ async def download_draft_excel(draft_id: UUID):
         c.alignment = Alignment(horizontal="center")
 
     row = 2
-    boxes = data.get("shipment_boxes", []) or []
     for box in boxes:
         items = box.get("shipment_box_items", []) or [{}]
         recv = box.get("receiver_address", {}) or {}
@@ -1099,9 +1227,6 @@ async def download_draft_excel(draft_id: UUID):
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
-
-    inv = data.get("invoice_number", str(draft_id)[:8])
-    safe_inv = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(inv))
     filename = f"draft_{safe_inv}.xlsx"
 
     return FastAPIResponse(
