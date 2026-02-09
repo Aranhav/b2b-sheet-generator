@@ -109,7 +109,9 @@ _PACKING_LIST_PROMPT = """\
 You are extracting packing list data from Indian export shipment documents.
 
 CRITICAL INSTRUCTIONS:
-- Extract ONLY packing list data: destinations, boxes, weights, dimensions.
+- Extract packing list data: destinations, boxes, weights, dimensions.
+- ALSO extract the reference fields at the top level (invoice_number, exporter_name, consignee_name) \
+if they appear anywhere on the document -- these are needed to match this packing list to its invoice.
 - Extract ALL boxes from the document. Do NOT truncate or summarize. Every single box must appear.
 - If boxes ship to multiple destinations/warehouses, list each destination in the "destinations" array and reference it from each box via "destination_id".
 - If all boxes go to the same destination, still include it as a single entry in "destinations".
@@ -121,6 +123,9 @@ Return ONLY a valid JSON object (no markdown fences, no commentary).
 
 JSON SCHEMA:
 {
+  "invoice_number": "WFS-042025-26",
+  "exporter_name": "Redplum Pvt Ltd",
+  "consignee_name": "WALMART",
   "total_boxes": 105,
   "total_net_weight_kg": 450.5,
   "total_gross_weight_kg": 520.0,
@@ -514,6 +519,7 @@ def _call_retry(
 async def _extract_invoice(
     pages_data: list[dict[str, Any]],
     is_vision: bool,
+    correction_hints: str = "",
 ) -> dict[str, Any]:
     """Call 1: Extract invoice data (line items, addresses, amounts)."""
     loop = asyncio.get_running_loop()
@@ -527,9 +533,13 @@ async def _extract_invoice(
         user_content = _build_text_user_message(pages_data, "invoice")
         model = LLM_MODEL_TEXT
 
+    system_prompt = _INVOICE_PROMPT
+    if correction_hints:
+        system_prompt += f"\n\nCommon corrections to watch for:\n{correction_hints}"
+
     raw_response = await loop.run_in_executor(
         None,
-        partial(_call_llm, model, _INVOICE_PROMPT, user_content, LLM_MAX_TOKENS_INVOICE),
+        partial(_call_llm, model, system_prompt, user_content, LLM_MAX_TOKENS_INVOICE),
     )
     logger.info("Invoice LLM response: %d chars from %s", len(raw_response), model)
 
@@ -539,7 +549,7 @@ async def _extract_invoice(
         logger.warning("Invoice JSON parse failed (%s), retrying", first_err)
         retry_response = await loop.run_in_executor(
             None,
-            partial(_call_retry, model, _INVOICE_PROMPT, user_content, LLM_MAX_TOKENS_INVOICE),
+            partial(_call_retry, model, system_prompt, user_content, LLM_MAX_TOKENS_INVOICE),
         )
         return _extract_json_from_response(retry_response)
 
@@ -547,6 +557,7 @@ async def _extract_invoice(
 async def _extract_packing_list(
     pages_data: list[dict[str, Any]],
     is_vision: bool,
+    correction_hints: str = "",
 ) -> dict[str, Any]:
     """Call 2: Extract packing list data (destinations + all boxes, flat schema)."""
     loop = asyncio.get_running_loop()
@@ -561,9 +572,13 @@ async def _extract_packing_list(
 
     model = LLM_MODEL_PACKING_LIST
 
+    system_prompt = _PACKING_LIST_PROMPT
+    if correction_hints:
+        system_prompt += f"\n\nCommon corrections to watch for:\n{correction_hints}"
+
     raw_response = await loop.run_in_executor(
         None,
-        partial(_call_llm, model, _PACKING_LIST_PROMPT, user_content, LLM_MAX_TOKENS_PACKING_LIST),
+        partial(_call_llm, model, system_prompt, user_content, LLM_MAX_TOKENS_PACKING_LIST),
     )
     logger.info("Packing list LLM response: %d chars from %s", len(raw_response), model)
 
@@ -573,7 +588,7 @@ async def _extract_packing_list(
         logger.warning("Packing list JSON parse failed (%s), retrying", first_err)
         retry_response = await loop.run_in_executor(
             None,
-            partial(_call_retry, model, _PACKING_LIST_PROMPT, user_content, LLM_MAX_TOKENS_PACKING_LIST),
+            partial(_call_retry, model, system_prompt, user_content, LLM_MAX_TOKENS_PACKING_LIST),
         )
         return _extract_json_from_response(retry_response)
 

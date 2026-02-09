@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import UPLOAD_DIR
-from backend.routers import export, extraction
+from backend.routers import agent, export, extraction
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -42,11 +42,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     logger.info("Output directory ready: %s", UPLOAD_DIR)
+
+    # Initialize database (agent features)
+    from backend.db import init_db, close_db
+
+    try:
+        await init_db()
+    except Exception:
+        logger.warning("Database init failed -- agent features unavailable", exc_info=True)
+
     logger.info("B2B Sheet Generator service started.")
 
     yield
 
     # Shutdown
+    try:
+        await close_db()
+    except Exception:
+        logger.warning("Database close failed", exc_info=True)
     logger.info("B2B Sheet Generator service shutting down.")
 
 
@@ -79,6 +92,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 app.include_router(extraction.router)
 app.include_router(export.router)
+app.include_router(agent.router)
 
 
 # ---------------------------------------------------------------------------
