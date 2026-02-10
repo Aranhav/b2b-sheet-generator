@@ -1,18 +1,23 @@
 """Orchestrate Gaia classification and tariff enrichment for draft items.
 
-Pipeline (parallel dedup approach):
+Pipeline (parallel dedup approach with two-step tariff lookup):
   1. Collect ALL items across ALL boxes
   2. Normalize each description (deterministic: same input → same output)
   3. Deduplicate by normalized description (track original→normalized mapping)
   4. Batch check DB cache for ALL distinct hashes in one query
-  5. For cache misses, call Gaia in PARALLEL via asyncio.gather()
+  5. For cache misses:
+     a. Call classify_autonomous() in PARALLEL → get IHSN codes
+     b. Call get_tariff_detail() in PARALLEL → get tariff scenarios + cumulative duty
   6. Fan results back to ALL items sharing the same normalized description
   7. Cache all new results in DB
+
+Duty calculation (XOS formula):
+  cumulative_duty = base_rate + SUM(scenario.value WHERE is_additional=true)
 
 Rules:
 - EHSN: keep document-extracted value if non-empty; fall back to Gaia code
 - IHSN: always from Gaia (documents don't have import codes)
-- duty_rate: always from Gaia tariff detail (inline in autonomous response)
+- duty_rate: cumulative duty from tariff-detail (base + reciprocal tariffs)
 - Cache by normalized description + destination + origin country
 """
 from __future__ import annotations
@@ -27,7 +32,7 @@ from uuid import UUID
 
 from backend import db
 from backend.services import gaia_client
-from backend.services.gaia_client import parse_duty_rate
+from backend.services.gaia_client import parse_duty_rate, calculate_cumulative_duty
 from backend.services.description_normalizer import normalize_description
 
 logger = logging.getLogger(__name__)
@@ -53,12 +58,16 @@ class DescriptionGroup:
 
 @dataclass
 class GaiaResult:
-    """Parsed Gaia classification result ready to apply to items."""
+    """Parsed Gaia classification + tariff result ready to apply to items."""
     ihsn: str = ""
     ehsn_fallback: str = ""
     duty_rate: float | None = None
+    base_duty_rate: float | None = None
     confidence: str = ""
+    tariff_scenarios: list[dict[str, Any]] = field(default_factory=list)
+    remedy_flags: dict[str, bool] = field(default_factory=dict)
     gaia_response: dict[str, Any] | None = None
+    tariff_response: dict[str, Any] | None = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -69,32 +78,83 @@ def _hash_key(normalized_desc: str, destination: str, origin: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _parse_gaia_response(data: dict[str, Any]) -> GaiaResult:
-    """Extract usable fields from a Gaia autonomous classification response."""
-    code = data.get("best_guess_code") or ""
-    confidence = data.get("confidence") or ""
+def _parse_gaia_response(
+    classification_data: dict[str, Any],
+    tariff_data: dict[str, Any] | None,
+) -> GaiaResult:
+    """Build a GaiaResult from classification + tariff-detail responses."""
+    code = classification_data.get("best_guess_code") or ""
+    confidence = classification_data.get("confidence") or ""
 
-    tariff_detail = data.get("tariff_detail") or {}
-    rod = tariff_detail.get("rate_of_duty") or {}
-    duty_rate = parse_duty_rate(rod.get("general"))
+    # Try cumulative duty from tariff-detail endpoint first
+    base_rate: float | None = None
+    cumulative_rate: float | None = None
+    scenario_summaries: list[dict[str, Any]] = []
+    remedy_flags: dict[str, bool] = {}
+
+    if tariff_data:
+        base_rate, cumulative_rate, scenario_summaries = calculate_cumulative_duty(tariff_data)
+
+        # Extract remedy flags
+        for flag in tariff_data.get("flags") or []:
+            if flag.get("name") == "remedy":
+                val = flag.get("value") or {}
+                remedy_flags = {
+                    "add_risk": bool(val.get("possible_add_required_indicator")),
+                    "cvd_risk": bool(val.get("possible_cvd_duty_required_indicator")),
+                }
+
+    # Fallback: if tariff-detail failed, use base rate from autonomous inline tariff_detail
+    if cumulative_rate is None:
+        inline_td = classification_data.get("tariff_detail") or {}
+        rod = inline_td.get("rate_of_duty") or {}
+        fallback_rate = parse_duty_rate(rod.get("general"))
+        if fallback_rate is not None:
+            base_rate = fallback_rate
+            cumulative_rate = fallback_rate  # No scenarios available, base = cumulative
 
     return GaiaResult(
         ihsn=code,
-        ehsn_fallback=code,  # Use as EHSN only if document didn't provide one
-        duty_rate=duty_rate,
+        ehsn_fallback=code,
+        duty_rate=cumulative_rate,
+        base_duty_rate=base_rate,
         confidence=confidence,
-        gaia_response=data,
+        tariff_scenarios=scenario_summaries,
+        remedy_flags=remedy_flags,
+        gaia_response=classification_data,
+        tariff_response=tariff_data,
     )
 
 
 def _parse_cached_row(row: dict[str, Any]) -> GaiaResult:
     """Convert a DB cache row into a GaiaResult."""
+    tariff_resp = row.get("tariff_response")
+
+    # Reconstruct scenarios and remedy from cached tariff_response
+    base_rate: float | None = None
+    scenario_summaries: list[dict[str, Any]] = []
+    remedy_flags: dict[str, bool] = {}
+
+    if tariff_resp and isinstance(tariff_resp, dict):
+        base_rate, _, scenario_summaries = calculate_cumulative_duty(tariff_resp)
+        for flag in tariff_resp.get("flags") or []:
+            if flag.get("name") == "remedy":
+                val = flag.get("value") or {}
+                remedy_flags = {
+                    "add_risk": bool(val.get("possible_add_required_indicator")),
+                    "cvd_risk": bool(val.get("possible_cvd_duty_required_indicator")),
+                }
+
     return GaiaResult(
         ihsn=row.get("ihsn") or "",
         ehsn_fallback=row.get("ehsn") or "",
         duty_rate=row.get("duty_rate"),
+        base_duty_rate=base_rate,
         confidence=row.get("confidence") or "",
+        tariff_scenarios=scenario_summaries,
+        remedy_flags=remedy_flags,
         gaia_response=row.get("classification_response"),
+        tariff_response=tariff_resp,
     )
 
 
@@ -105,6 +165,12 @@ def _apply_result(item: dict[str, Any], result: GaiaResult, norm_desc: str) -> N
         item["ehsn"] = result.ehsn_fallback
     if result.duty_rate is not None:
         item["duty_rate"] = result.duty_rate
+    if result.base_duty_rate is not None:
+        item["base_duty_rate"] = result.base_duty_rate
+    if result.tariff_scenarios:
+        item["tariff_scenarios"] = result.tariff_scenarios
+    if result.remedy_flags:
+        item["remedy_flags"] = result.remedy_flags
     item["gaia_classified"] = True
     item["gaia_description"] = norm_desc
     if result.confidence:
@@ -121,6 +187,10 @@ def _apply_result_to_product(product: dict[str, Any], result: GaiaResult, norm_d
         product["hsn_code"] = result.ehsn_fallback
     if result.duty_rate is not None:
         product["duty_rate"] = result.duty_rate
+    if result.base_duty_rate is not None:
+        product["base_duty_rate"] = result.base_duty_rate
+    if result.tariff_scenarios:
+        product["tariff_scenarios"] = result.tariff_scenarios
     product["gaia_classified"] = True
     product["gaia_description"] = norm_desc
     if result.confidence:
@@ -134,13 +204,11 @@ async def enrich_items_with_gaia(
     destination_country: str = "US",
     origin_country: str = "IN",
 ) -> dict[str, Any]:
-    """Enrich all box items with Gaia IHSN, duty%, and optionally EHSN.
+    """Enrich all box items with Gaia IHSN, cumulative duty%, and optionally EHSN.
 
-    Uses parallel dedup approach:
-    - Deduplicates descriptions so each unique product is classified once
-    - Checks DB cache in a single batch query
-    - Calls Gaia in parallel for all cache misses
-    - Fans results back to all items sharing the same description
+    Two-step lookup per unique description:
+      1. classify_autonomous() → IHSN code
+      2. get_tariff_detail() → tariff scenarios → cumulative duty
 
     Modifies shipment_data in-place and returns it.
     """
@@ -210,21 +278,35 @@ async def enrich_items_with_gaia(
         else:
             miss_hashes.append(desc_hash)
 
-    # ── Step 4: Call Gaia in PARALLEL for all cache misses ──
+    # ── Step 4: Classify + tariff lookup in PARALLEL for cache misses ──
     if miss_hashes:
-        async def _classify_one(h: str) -> tuple[str, GaiaResult | None]:
+        async def _classify_and_lookup(h: str) -> tuple[str, GaiaResult | None]:
+            """Two-step: classify → tariff detail → cumulative duty."""
             g = groups[h]
-            data = await gaia_client.classify_autonomous(
+
+            # Step 4a: Classify to get IHSN code
+            classification = await gaia_client.classify_autonomous(
                 name=g.normalized,
                 description=g.normalized,
                 destination_country=destination_country,
             )
-            if data:
-                return (h, _parse_gaia_response(data))
-            return (h, None)
+            if not classification:
+                return (h, None)
 
-        # Run all Gaia calls concurrently
-        tasks = [_classify_one(h) for h in miss_hashes]
+            # Step 4b: Get tariff detail for the classified code
+            ihsn_code = classification.get("best_guess_code") or ""
+            tariff_detail = None
+            if ihsn_code:
+                tariff_detail = await gaia_client.get_tariff_detail(
+                    destination_country=destination_country,
+                    tariff_code=ihsn_code,
+                    origin_country=origin_country,
+                )
+
+            return (h, _parse_gaia_response(classification, tariff_detail))
+
+        # Run all two-step lookups concurrently
+        tasks = [_classify_and_lookup(h) for h in miss_hashes]
         gaia_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in gaia_results:
@@ -235,7 +317,7 @@ async def enrich_items_with_gaia(
             if parsed:
                 results[h] = parsed
 
-                # Cache the new result
+                # Cache the new result (with cumulative duty and tariff_response)
                 g = groups[h]
                 try:
                     await db.upsert_gaia_classification(
@@ -248,7 +330,7 @@ async def enrich_items_with_gaia(
                         duty_rate=parsed.duty_rate,
                         confidence=parsed.confidence,
                         classification_response=parsed.gaia_response,
-                        tariff_response=None,  # tariff is inline in classification_response
+                        tariff_response=parsed.tariff_response,
                     )
                 except Exception:
                     logger.warning("Failed to cache Gaia result for hash %s", h[:12], exc_info=True)

@@ -157,6 +157,10 @@ DO $$ BEGIN
   ALTER TABLE gaia_classifications ALTER COLUMN confidence TYPE TEXT USING confidence::TEXT;
 EXCEPTION WHEN others THEN NULL; END $$;
 
+-- Clear stale Gaia cache entries that lack tariff_response (before reciprocal tariff support)
+-- so they get re-fetched with full tariff_detail including tariff_scenario
+DELETE FROM gaia_classifications WHERE tariff_response IS NULL;
+
 -- Xindus customer linking (idempotent)
 DO $$ BEGIN
   ALTER TABLE sellers ADD COLUMN xindus_customer_id INT DEFAULT NULL;
