@@ -107,6 +107,8 @@ def _apply_result(item: dict[str, Any], result: GaiaResult, norm_desc: str) -> N
         item["duty_rate"] = result.duty_rate
     item["gaia_classified"] = True
     item["gaia_description"] = norm_desc
+    if result.confidence:
+        item["hsn_confidence"] = result.confidence
 
 
 def _apply_result_to_product(product: dict[str, Any], result: GaiaResult, norm_desc: str) -> None:
@@ -121,6 +123,8 @@ def _apply_result_to_product(product: dict[str, Any], result: GaiaResult, norm_d
         product["duty_rate"] = result.duty_rate
     product["gaia_classified"] = True
     product["gaia_description"] = norm_desc
+    if result.confidence:
+        product["hsn_confidence"] = result.confidence
 
 
 # ── Main enrichment (parallel dedup) ────────────────────────────────────
