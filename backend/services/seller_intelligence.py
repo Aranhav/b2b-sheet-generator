@@ -77,14 +77,14 @@ async def match_or_create_seller(
         defaults = _parse_jsonb(seller.get("defaults"))
         return seller["id"], defaults if defaults else None
 
-    # 2. Fuzzy fallback — scan all sellers
+    # 2. Fuzzy fallback — scan all sellers (use best of ratio + token_set_ratio)
     all_sellers = await db.get_all_sellers()
     best_match: dict[str, Any] | None = None
     best_ratio = 0
 
     for s in all_sellers:
         s_norm = s.get("normalized_name", "")
-        ratio = fuzz.ratio(norm, s_norm)
+        ratio = max(fuzz.ratio(norm, s_norm), fuzz.token_set_ratio(norm, s_norm))
         if ratio >= _FUZZY_THRESHOLD and ratio > best_ratio:
             best_ratio = ratio
             best_match = s
@@ -118,43 +118,63 @@ async def match_xindus_customer(
 ) -> int | None:
     """Try to find the matching Xindus customer ID for a seller.
 
-    Searches local xindus_customers table (mirrored from prod).
-    1. Search by company name
-    2. If 1 result → return it
-    3. If multiple → use Claude Haiku to disambiguate
-    4. Returns None if no match
+    Uses multiple search strategies to find candidates, then
+    lets Claude Haiku pick the best match from all results.
     """
+    seen_ids: set[int] = set()
+    all_candidates: list[dict[str, Any]] = []
+
+    def _add(rows: list[dict[str, Any]]) -> None:
+        for r in rows:
+            rid = int(r["id"])
+            if rid not in seen_ids:
+                seen_ids.add(rid)
+                all_candidates.append(r)
+
+    # Strategy 1: search with raw name
     try:
-        candidates = await db.search_xindus_customers(seller_name, limit=10)
+        _add(await db.search_xindus_customers(seller_name, limit=10))
     except Exception:
-        logger.warning("Xindus customer search failed", exc_info=True)
+        logger.warning("Xindus customer search failed (raw)", exc_info=True)
+
+    # Strategy 2: search with normalized name
+    norm = normalize_name(seller_name)
+    if norm and norm != seller_name.upper().strip():
+        try:
+            _add(await db.search_xindus_customers(norm, limit=10))
+        except Exception:
+            pass
+
+    # Strategy 3: search with individual significant words (3+ chars)
+    words = [w for w in norm.split() if len(w) >= 3]
+    for word in words[:3]:
+        try:
+            _add(await db.search_xindus_customers(word, limit=5))
+        except Exception:
+            pass
+
+    if not all_candidates:
         return None
 
-    if not candidates:
-        return None
+    if len(all_candidates) == 1:
+        return int(all_candidates[0]["id"])
 
-    if len(candidates) == 1:
-        return int(candidates[0]["id"])
-
-    # Multiple candidates — try LLM disambiguation
-    # Map to the format _llm_pick_best_customer expects
+    # Multiple candidates — let Claude pick the best
     llm_candidates = [
         {
             "id": c["id"],
             "company": c.get("company_name", ""),
-            "city": None,
-            "state": None,
             "iec": c.get("iec"),
-            "shipment_count": 0,
+            "crn_number": c.get("crn_number"),
         }
-        for c in candidates
+        for c in all_candidates
     ]
     picked = await _llm_pick_best_customer(seller_name, shipper_address, llm_candidates)
     if picked is not None:
         return picked
 
     # Fallback: first result (best text-search match)
-    return int(candidates[0]["id"])
+    return int(all_candidates[0]["id"])
 
 
 async def _llm_pick_best_customer(
@@ -181,19 +201,22 @@ async def _llm_pick_best_customer(
         for c in candidates:
             line = (
                 f"ID={c['id']}, company=\"{c.get('company', '')}\", "
-                f"city=\"{c.get('city', '')}\", state=\"{c.get('state', '')}\", "
-                f"iec=\"{c.get('iec', '')}\", shipments={c.get('shipment_count', 0)}"
+                f"iec=\"{c.get('iec', '')}\", crn=\"{c.get('crn_number', '')}\""
             )
             candidate_lines.append(line)
 
         prompt = (
-            f"Seller name: \"{seller_name}\"\n"
+            f"You are matching a seller from a shipping invoice to a registered Xindus customer.\n\n"
+            f"Seller name from invoice: \"{seller_name}\"\n"
             f"Seller address: \"{addr_str}\"\n\n"
+            f"Important: Invoice names are often messy — they may include proprietor names "
+            f"(e.g. 'SHREE RAM ONLINE M/S AMIT KUMAR'), abbreviations, or extra words. "
+            f"Focus on the core company/brand name when matching.\n\n"
             f"Xindus customer candidates:\n"
             + "\n".join(f"  {i+1}. {l}" for i, l in enumerate(candidate_lines))
-            + "\n\nWhich customer ID is the best match for this seller? "
-            "Consider company name similarity, city/state match, and IEC number. "
-            "Reply with JSON: {\"customer_id\": <int or null>, \"confidence\": <0.0-1.0>, \"reason\": \"...\"}"
+            + "\n\nWhich customer ID is the best match? "
+            "Reply with JSON: {\"customer_id\": <int or null>, \"confidence\": <0.0-1.0>, \"reason\": \"...\"}\n"
+            "Set confidence >= 0.6 if the core company name clearly matches."
         )
 
         response = await client.messages.create(
@@ -203,14 +226,13 @@ async def _llm_pick_best_customer(
         )
 
         text = response.content[0].text.strip()
-        # Extract JSON from response
         start = text.find("{")
         end = text.rfind("}") + 1
         if start >= 0 and end > start:
             parsed = json.loads(text[start:end])
             cid = parsed.get("customer_id")
             confidence = parsed.get("confidence", 0)
-            if cid is not None and confidence >= 0.7:
+            if cid is not None and confidence >= 0.6:
                 logger.info(
                     "LLM picked Xindus customer %s for '%s' (confidence=%.2f, reason=%s)",
                     cid, seller_name, confidence, parsed.get("reason", ""),
