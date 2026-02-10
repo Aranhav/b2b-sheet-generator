@@ -99,7 +99,7 @@ def _parse_cached_row(row: dict[str, Any]) -> GaiaResult:
 
 
 def _apply_result(item: dict[str, Any], result: GaiaResult, norm_desc: str) -> None:
-    """Apply a Gaia result to a shipment item dict, following the rules."""
+    """Apply a Gaia result to a shipment box item dict, following the rules."""
     item["ihsn"] = result.ihsn
     if not item.get("ehsn"):
         item["ehsn"] = result.ehsn_fallback
@@ -107,6 +107,20 @@ def _apply_result(item: dict[str, Any], result: GaiaResult, norm_desc: str) -> N
         item["duty_rate"] = result.duty_rate
     item["gaia_classified"] = True
     item["gaia_description"] = norm_desc
+
+
+def _apply_result_to_product(product: dict[str, Any], result: GaiaResult, norm_desc: str) -> None:
+    """Apply a Gaia result to a product_details item (customs summary).
+
+    product_details uses hsn_code (export HSN) and ihsn (import HSN).
+    """
+    product["ihsn"] = result.ihsn
+    if not product.get("hsn_code"):
+        product["hsn_code"] = result.ehsn_fallback
+    if result.duty_rate is not None:
+        product["duty_rate"] = result.duty_rate
+    product["gaia_classified"] = True
+    product["gaia_description"] = norm_desc
 
 
 # ── Main enrichment (parallel dedup) ────────────────────────────────────
@@ -246,9 +260,25 @@ async def enrich_items_with_gaia(
             _apply_result(item, result, group.normalized)
             applied += 1
 
+    # ── Step 6: Also enrich product_details[] (customs summary) ──
+    product_details = shipment_data.get("product_details") or []
+    products_enriched = 0
+    for product in product_details:
+        desc = product.get("product_description") or ""
+        if not desc.strip():
+            continue
+        norm_desc = normalize_description(desc)
+        if not norm_desc:
+            continue
+        desc_hash = _hash_key(norm_desc, destination_country, origin_country)
+        result = results.get(desc_hash)
+        if result:
+            _apply_result_to_product(product, result, norm_desc)
+            products_enriched += 1
+
     logger.info(
-        "Gaia enrichment complete: %d/%d items enriched (%d distinct descriptions)",
-        applied, total_items, len(results),
+        "Gaia enrichment complete: %d/%d box items, %d/%d products enriched (%d distinct)",
+        applied, total_items, products_enriched, len(product_details), len(results),
     )
 
     return shipment_data

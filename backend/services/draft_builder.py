@@ -257,6 +257,7 @@ def _map_products(line_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         products.append({
             "product_description": _cv(li, "description") or "",
             "hsn_code": _cv(li, "hs_code_origin", "hs_code_destination") or "",
+            "ihsn": _cv(li, "hs_code_destination") or "",
             "value": _cv_float(li, "total_price_usd") or 0,
             "country_of_origin": _cv(li, "country_of_origin") or "IN",
             "unit_price": _cv_float(li, "unit_price_usd"),
