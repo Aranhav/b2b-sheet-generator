@@ -1,9 +1,10 @@
 """Per-seller intelligence: match sellers, apply defaults, harvest learnings.
 
-Zero extra LLM tokens — all logic is DB lookups and dict merging.
+Uses Metabase + Claude Haiku for Xindus customer auto-matching.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -72,6 +73,7 @@ async def match_or_create_seller(
     # 1. Exact match on normalized_name
     seller = await db.get_seller_by_normalized_name(norm)
     if seller:
+        await _try_link_xindus_customer(seller["id"], shipper_name, shipper_address)
         defaults = _parse_jsonb(seller.get("defaults"))
         return seller["id"], defaults if defaults else None
 
@@ -88,6 +90,7 @@ async def match_or_create_seller(
             best_match = s
 
     if best_match:
+        await _try_link_xindus_customer(best_match["id"], shipper_name, shipper_address)
         defaults = _parse_jsonb(best_match.get("defaults"))
         return best_match["id"], defaults if defaults else None
 
@@ -97,7 +100,154 @@ async def match_or_create_seller(
         normalized_name=norm,
         shipper_address=shipper_address,
     )
+
+    # ── Auto-match Xindus customer (runs for all paths) ──
+    await _try_link_xindus_customer(seller_id, shipper_name, shipper_address)
+
     return seller_id, None
+
+
+# ---------------------------------------------------------------------------
+# Xindus customer auto-matching
+# ---------------------------------------------------------------------------
+
+
+async def match_xindus_customer(
+    seller_name: str,
+    shipper_address: dict[str, Any] | None = None,
+) -> int | None:
+    """Try to find the matching Xindus customer ID for a seller.
+
+    1. Search Metabase customers by company name
+    2. If 1 result → return it
+    3. If multiple → use Claude Haiku to disambiguate
+    4. Returns None if no match or if Metabase is unavailable
+    """
+    try:
+        from backend.services.metabase import query_metabase, escape_sql
+    except Exception:
+        logger.debug("Metabase client not available, skipping Xindus match")
+        return None
+
+    escaped = escape_sql(seller_name)
+    sql = (
+        "SELECT id, company, contact_name, email, iec, gstn, city, state, "
+        "COALESCE(shipment_count, 0) AS shipment_count "
+        "FROM customers "
+        "WHERE status = 'APPROVED' AND company IS NOT NULL "
+        f"AND company LIKE '%{escaped}%' "
+        "ORDER BY COALESCE(shipment_count, 0) DESC "
+        "LIMIT 10"
+    )
+
+    try:
+        candidates = await query_metabase(sql)
+    except Exception:
+        logger.warning("Metabase query failed for Xindus customer match", exc_info=True)
+        return None
+
+    if not candidates:
+        return None
+
+    if len(candidates) == 1:
+        return int(candidates[0]["id"])
+
+    # Multiple candidates — try LLM disambiguation
+    picked = await _llm_pick_best_customer(seller_name, shipper_address, candidates)
+    if picked is not None:
+        return picked
+
+    # Fallback: highest shipment_count
+    best = max(candidates, key=lambda c: c.get("shipment_count") or 0)
+    return int(best["id"])
+
+
+async def _llm_pick_best_customer(
+    seller_name: str,
+    shipper_address: dict[str, Any] | None,
+    candidates: list[dict[str, Any]],
+) -> int | None:
+    """Use Claude Haiku to pick the best Xindus customer from candidates."""
+    try:
+        import anthropic
+        client = anthropic.AsyncAnthropic()
+
+        addr_str = ""
+        if shipper_address:
+            parts = [
+                shipper_address.get("address", ""),
+                shipper_address.get("city", ""),
+                shipper_address.get("state", ""),
+                shipper_address.get("country", ""),
+            ]
+            addr_str = ", ".join(p for p in parts if p)
+
+        candidate_lines = []
+        for c in candidates:
+            line = (
+                f"ID={c['id']}, company=\"{c.get('company', '')}\", "
+                f"city=\"{c.get('city', '')}\", state=\"{c.get('state', '')}\", "
+                f"iec=\"{c.get('iec', '')}\", shipments={c.get('shipment_count', 0)}"
+            )
+            candidate_lines.append(line)
+
+        prompt = (
+            f"Seller name: \"{seller_name}\"\n"
+            f"Seller address: \"{addr_str}\"\n\n"
+            f"Xindus customer candidates:\n"
+            + "\n".join(f"  {i+1}. {l}" for i, l in enumerate(candidate_lines))
+            + "\n\nWhich customer ID is the best match for this seller? "
+            "Consider company name similarity, city/state match, and IEC number. "
+            "Reply with JSON: {\"customer_id\": <int or null>, \"confidence\": <0.0-1.0>, \"reason\": \"...\"}"
+        )
+
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        text = response.content[0].text.strip()
+        # Extract JSON from response
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            parsed = json.loads(text[start:end])
+            cid = parsed.get("customer_id")
+            confidence = parsed.get("confidence", 0)
+            if cid is not None and confidence >= 0.7:
+                logger.info(
+                    "LLM picked Xindus customer %s for '%s' (confidence=%.2f, reason=%s)",
+                    cid, seller_name, confidence, parsed.get("reason", ""),
+                )
+                return int(cid)
+
+    except Exception:
+        logger.warning("LLM customer disambiguation failed", exc_info=True)
+
+    return None
+
+
+async def _try_link_xindus_customer(
+    seller_id: UUID,
+    seller_name: str,
+    shipper_address: dict[str, Any] | None = None,
+) -> None:
+    """Attempt to auto-link a seller to a Xindus customer (idempotent)."""
+    try:
+        seller_row = await db.get_seller(seller_id)
+        if seller_row and seller_row.get("xindus_customer_id") is not None:
+            return  # Already linked
+
+        xindus_id = await match_xindus_customer(seller_name, shipper_address)
+        if xindus_id:
+            await db.update_seller_xindus_customer_id(seller_id, xindus_id)
+            logger.info(
+                "Auto-linked seller '%s' (%s) to Xindus customer %d",
+                seller_name, seller_id, xindus_id,
+            )
+    except Exception:
+        logger.warning("Xindus customer auto-link failed for '%s'", seller_name, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

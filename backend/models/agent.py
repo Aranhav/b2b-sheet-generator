@@ -52,6 +52,7 @@ class SellerProfile(BaseModel):
     defaults: dict[str, Any] = Field(default_factory=dict)
     shipper_address: dict[str, Any] = Field(default_factory=dict)
     shipment_count: int = 0
+    xindus_customer_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

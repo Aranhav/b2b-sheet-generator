@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS shipping_methods (
 INSERT INTO shipping_methods (code, name, is_b2b, active) VALUES
   ('AN', 'Xindus B2B Express', true, true)
 ON CONFLICT (code) DO NOTHING;
+
+-- Xindus customer linking (idempotent)
+DO $$ BEGIN
+  ALTER TABLE sellers ADD COLUMN xindus_customer_id INT DEFAULT NULL;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 """
 
 # ---------------------------------------------------------------------------
@@ -719,6 +724,17 @@ async def update_seller_defaults(
             seller_id,
             json.dumps(defaults),
         )
+
+
+async def update_seller_xindus_customer_id(
+    seller_id: UUID, xindus_customer_id: int | None
+) -> None:
+    """Set or clear the linked Xindus customer ID for a seller."""
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE sellers SET xindus_customer_id = $1, updated_at = NOW() WHERE id = $2",
+        xindus_customer_id, seller_id,
+    )
 
 
 async def increment_seller_shipment_count(seller_id: UUID) -> None:

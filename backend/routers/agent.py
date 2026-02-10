@@ -578,6 +578,7 @@ async def get_draft(draft_id: UUID):
                 defaults=_parse_jsonb(seller_row.get("defaults")) or {},
                 shipper_address=_parse_jsonb(seller_row.get("shipper_address")) or {},
                 shipment_count=seller_row.get("shipment_count", 0),
+                xindus_customer_id=seller_row.get("xindus_customer_id"),
                 created_at=seller_row.get("created_at"),
                 updated_at=seller_row.get("updated_at"),
             )
@@ -622,6 +623,16 @@ async def apply_corrections(draft_id: UUID, body: CorrectionRequest):
 
     # Apply each correction
     for correction in body.corrections:
+        # Special case: xindus_customer_id updates the seller record
+        if correction.field_path == "xindus_customer_id":
+            if correction.new_value and draft_seller_id:
+                await db.update_seller_xindus_customer_id(
+                    draft_seller_id, int(correction.new_value)
+                )
+            elif draft_seller_id:
+                await db.update_seller_xindus_customer_id(draft_seller_id, None)
+            continue
+
         # Special case: seller_id updates the DB column, not the shipment JSON
         if correction.field_path == "seller_id":
             new_seller_id = correction.new_value
@@ -1268,6 +1279,7 @@ async def list_sellers():
             defaults=_parse_jsonb(r.get("defaults")) or {},
             shipper_address=_parse_jsonb(r.get("shipper_address")) or {},
             shipment_count=r.get("shipment_count", 0),
+            xindus_customer_id=r.get("xindus_customer_id"),
             created_at=r.get("created_at"),
             updated_at=r.get("updated_at"),
         )
@@ -1364,6 +1376,7 @@ async def match_seller(name: str):
         defaults=_parse_jsonb(seller_row.get("defaults")) or {},
         shipper_address=_parse_jsonb(seller_row.get("shipper_address")) or {},
         shipment_count=seller_row.get("shipment_count", 0),
+        xindus_customer_id=seller_row.get("xindus_customer_id"),
         created_at=seller_row.get("created_at"),
         updated_at=seller_row.get("updated_at"),
     )
