@@ -147,3 +147,44 @@ class ActiveBatch(BaseModel):
 class ActiveBatchesResponse(BaseModel):
     """Response for GET /api/agent/batches/active."""
     batches: list[ActiveBatch] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Xindus customer/address models (mirrored from prod)
+# ---------------------------------------------------------------------------
+
+
+class XindusCustomer(BaseModel):
+    id: int
+    company_name: str
+    iec: str | None = None
+    gstn: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    status: str | None = None
+
+
+class XindusAddress(BaseModel):
+    id: int
+    customer_id: int
+    type: str
+    name: str | None = None
+    address: str | None = None
+    city: str | None = None
+    district: str | None = None
+    state: str | None = None
+    zip: str | None = None
+    country: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    is_active: bool = True
+
+
+class XindusSyncRequest(BaseModel):
+    customers: list[dict] = Field(default_factory=list)
+    addresses: list[dict] = Field(default_factory=list)
+
+
+class XindusSyncResponse(BaseModel):
+    customers_upserted: int
+    addresses_upserted: int

@@ -40,6 +40,10 @@ from backend.models.agent import (
     SellersListResponse,
     SSEProgress,
     UploadResponse,
+    XindusAddress,
+    XindusCustomer,
+    XindusSyncRequest,
+    XindusSyncResponse,
 )
 from backend.services.classifier import classify_document
 from backend.services.draft_builder import build_draft_shipment
@@ -1379,6 +1383,49 @@ async def match_seller(name: str):
         xindus_customer_id=seller_row.get("xindus_customer_id"),
         created_at=seller_row.get("created_at"),
         updated_at=seller_row.get("updated_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Xindus customer/address endpoints (mirrored data)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/xindus/customers/search")
+async def search_xindus_customers(q: str = "", limit: int = 20):
+    """Search Xindus customers by company name or ID."""
+    if not q.strip() or len(q.strip()) < 2:
+        return {"customers": []}
+    rows = await db.search_xindus_customers(q.strip(), min(limit, 50))
+    customers = [XindusCustomer(**r) for r in rows]
+    return {"customers": [c.model_dump() for c in customers]}
+
+
+@router.get("/xindus/customers/{customer_id}")
+async def get_xindus_customer(customer_id: int):
+    """Get a single Xindus customer by ID."""
+    row = await db.get_xindus_customer(customer_id)
+    if not row:
+        raise HTTPException(404, "Customer not found")
+    return XindusCustomer(**row).model_dump()
+
+
+@router.get("/xindus/customers/{customer_id}/addresses")
+async def get_xindus_addresses(customer_id: int, type: str | None = None):
+    """Get addresses for a Xindus customer, optionally filtered by type."""
+    rows = await db.get_xindus_addresses(customer_id, type)
+    addresses = [XindusAddress(**r) for r in rows]
+    return {"addresses": [a.model_dump() for a in addresses]}
+
+
+@router.post("/xindus/sync", response_model=XindusSyncResponse)
+async def sync_xindus_data(body: XindusSyncRequest):
+    """Bulk upsert Xindus customers and addresses (called by local sync script)."""
+    customers_count = await db.upsert_xindus_customers(body.customers)
+    addresses_count = await db.upsert_xindus_addresses(body.addresses)
+    return XindusSyncResponse(
+        customers_upserted=customers_count,
+        addresses_upserted=addresses_count,
     )
 
 

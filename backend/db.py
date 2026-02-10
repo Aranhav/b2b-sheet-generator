@@ -138,6 +138,41 @@ ON CONFLICT (code) DO NOTHING;
 DO $$ BEGIN
   ALTER TABLE sellers ADD COLUMN xindus_customer_id INT DEFAULT NULL;
 EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+-- Xindus customer/address mirror tables (synced from prod via local script)
+CREATE TABLE IF NOT EXISTS xindus_customers (
+    id          INTEGER PRIMARY KEY,
+    company_name TEXT NOT NULL,
+    iec         TEXT,
+    gstn        TEXT,
+    email       TEXT,
+    phone       TEXT,
+    status      TEXT DEFAULT 'Approved',
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_xindus_customers_name
+    ON xindus_customers USING gin (to_tsvector('english', company_name));
+
+CREATE TABLE IF NOT EXISTS xindus_addresses (
+    id          INTEGER PRIMARY KEY,
+    customer_id INTEGER NOT NULL REFERENCES xindus_customers(id),
+    type        TEXT NOT NULL,
+    name        TEXT,
+    address     TEXT,
+    city        TEXT,
+    district    TEXT,
+    state       TEXT,
+    zip         TEXT,
+    country     TEXT,
+    phone       TEXT,
+    email       TEXT,
+    is_active   BOOLEAN DEFAULT true,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_xindus_addresses_customer
+    ON xindus_addresses(customer_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -781,3 +816,145 @@ async def get_shipping_methods(b2b_only: bool = False) -> list[dict]:
             "SELECT code, name FROM shipping_methods WHERE active = true ORDER BY name"
         )
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Helpers: Xindus customers & addresses (mirrored from prod)
+# ---------------------------------------------------------------------------
+
+
+async def search_xindus_customers(
+    query: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Full-text search on company_name, or exact match by id."""
+    pool = get_pool()
+    # Try exact id match first
+    try:
+        cid = int(query)
+        rows = await pool.fetch(
+            "SELECT * FROM xindus_customers WHERE id = $1 LIMIT 1", cid
+        )
+        if rows:
+            return [dict(r) for r in rows]
+    except (ValueError, TypeError):
+        pass
+
+    # Full-text search
+    rows = await pool.fetch(
+        """SELECT *
+           FROM xindus_customers
+           WHERE to_tsvector('english', company_name) @@ plainto_tsquery('english', $1)
+              OR company_name ILIKE '%' || $1 || '%'
+           ORDER BY
+             CASE WHEN company_name ILIKE $1 || '%' THEN 0 ELSE 1 END,
+             company_name
+           LIMIT $2""",
+        query,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_xindus_customer(customer_id: int) -> dict[str, Any] | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM xindus_customers WHERE id = $1", customer_id
+    )
+    return dict(row) if row else None
+
+
+async def get_xindus_addresses(
+    customer_id: int, addr_type: str | None = None
+) -> list[dict[str, Any]]:
+    pool = get_pool()
+    if addr_type:
+        rows = await pool.fetch(
+            """SELECT * FROM xindus_addresses
+               WHERE customer_id = $1 AND type = $2 AND is_active = true
+               ORDER BY updated_at DESC""",
+            customer_id,
+            addr_type,
+        )
+    else:
+        rows = await pool.fetch(
+            """SELECT * FROM xindus_addresses
+               WHERE customer_id = $1 AND is_active = true
+               ORDER BY type, updated_at DESC""",
+            customer_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def upsert_xindus_customers(customers: list[dict[str, Any]]) -> int:
+    """Bulk upsert customers. Returns count of rows upserted."""
+    if not customers:
+        return 0
+    pool = get_pool()
+    count = 0
+    async with pool.acquire() as conn:
+        for c in customers:
+            await conn.execute(
+                """INSERT INTO xindus_customers (id, company_name, iec, gstn, email, phone, status, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                   ON CONFLICT (id) DO UPDATE SET
+                     company_name = EXCLUDED.company_name,
+                     iec = EXCLUDED.iec,
+                     gstn = EXCLUDED.gstn,
+                     email = EXCLUDED.email,
+                     phone = EXCLUDED.phone,
+                     status = EXCLUDED.status,
+                     updated_at = now()""",
+                c["id"],
+                c["company_name"],
+                c.get("iec"),
+                c.get("gstn"),
+                c.get("email"),
+                c.get("phone"),
+                c.get("status", "Approved"),
+            )
+            count += 1
+    return count
+
+
+async def upsert_xindus_addresses(addresses: list[dict[str, Any]]) -> int:
+    """Bulk upsert addresses. Returns count of rows upserted."""
+    if not addresses:
+        return 0
+    pool = get_pool()
+    count = 0
+    async with pool.acquire() as conn:
+        for a in addresses:
+            await conn.execute(
+                """INSERT INTO xindus_addresses
+                     (id, customer_id, type, name, address, city, district, state, zip, country, phone, email, is_active, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+                   ON CONFLICT (id) DO UPDATE SET
+                     customer_id = EXCLUDED.customer_id,
+                     type = EXCLUDED.type,
+                     name = EXCLUDED.name,
+                     address = EXCLUDED.address,
+                     city = EXCLUDED.city,
+                     district = EXCLUDED.district,
+                     state = EXCLUDED.state,
+                     zip = EXCLUDED.zip,
+                     country = EXCLUDED.country,
+                     phone = EXCLUDED.phone,
+                     email = EXCLUDED.email,
+                     is_active = EXCLUDED.is_active,
+                     updated_at = now()""",
+                a["id"],
+                a["customer_id"],
+                a["type"],
+                a.get("name"),
+                a.get("address"),
+                a.get("city"),
+                a.get("district"),
+                a.get("state"),
+                a.get("zip"),
+                a.get("country"),
+                a.get("phone"),
+                a.get("email"),
+                a.get("is_active", True),
+            )
+            count += 1
+    return count
