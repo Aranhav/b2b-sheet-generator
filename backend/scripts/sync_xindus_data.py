@@ -36,25 +36,39 @@ def get_metabase_session() -> str:
 
 
 def query_metabase(session: str, sql: str) -> list[dict]:
-    res = requests.post(
-        f"{METABASE_URL}/api/dataset",
-        headers={
-            "Content-Type": "application/json",
-            "X-Metabase-Session": session,
-        },
-        json={
-            "database": METABASE_DB_ID,
-            "type": "native",
-            "native": {"query": sql},
-        },
-        timeout=30,
-    )
-    res.raise_for_status()
-    data = res.json()
-    if data.get("error"):
-        raise RuntimeError(f"Metabase error: {data['error']}")
-    cols = [c["name"] for c in data["data"]["cols"]]
-    return [dict(zip(cols, row)) for row in data["data"]["rows"]]
+    """Query Metabase with automatic pagination (default limit is 2000 rows)."""
+    all_rows: list[dict] = []
+    page_size = 2000
+    offset = 0
+
+    while True:
+        paged_sql = f"{sql.rstrip().rstrip(';')} LIMIT {page_size} OFFSET {offset}"
+        res = requests.post(
+            f"{METABASE_URL}/api/dataset",
+            headers={
+                "Content-Type": "application/json",
+                "X-Metabase-Session": session,
+            },
+            json={
+                "database": METABASE_DB_ID,
+                "type": "native",
+                "native": {"query": paged_sql},
+            },
+            timeout=60,
+        )
+        res.raise_for_status()
+        data = res.json()
+        if data.get("error"):
+            raise RuntimeError(f"Metabase error: {data['error']}")
+        cols = [c["name"] for c in data["data"]["cols"]]
+        rows = [dict(zip(cols, row)) for row in data["data"]["rows"]]
+        all_rows.extend(rows)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+        print(f"    ...fetched {len(all_rows)} rows so far")
+
+    return all_rows
 
 
 def main():
