@@ -107,6 +107,12 @@ EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS idx_drafts_seller ON draft_shipments(seller_id);
 CREATE INDEX IF NOT EXISTS idx_corrections_seller ON corrections(seller_id);
 
+-- Sequential human-readable draft number (idempotent)
+CREATE SEQUENCE IF NOT EXISTS draft_number_seq;
+DO $$ BEGIN
+  ALTER TABLE draft_shipments ADD COLUMN draft_number INT UNIQUE DEFAULT nextval('draft_number_seq');
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
 -- Step tracking columns for persistent job status (idempotent)
 DO $$ BEGIN
   ALTER TABLE upload_batches ADD COLUMN current_step TEXT;

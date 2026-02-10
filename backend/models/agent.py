@@ -58,6 +58,7 @@ class SellerProfile(BaseModel):
 
 class DraftSummary(BaseModel):
     id: UUID
+    draft_number: Optional[int] = None
     status: str
     file_count: int = 0
     grouping_reason: Optional[str] = None
@@ -74,6 +75,7 @@ class DraftSummary(BaseModel):
 
 class DraftDetail(BaseModel):
     id: UUID
+    draft_number: Optional[int] = None
     batch_id: UUID
     status: str
     shipment_data: dict[str, Any]

@@ -458,6 +458,7 @@ async def list_drafts(
 
         drafts.append(DraftSummary(
             id=d["id"],
+            draft_number=d.get("draft_number"),
             status=d["status"],
             file_count=len(draft_file_ids),
             grouping_reason=d.get("grouping_reason"),
@@ -503,6 +504,7 @@ async def get_batch(batch_id: UUID):
 
         drafts.append(DraftSummary(
             id=d["id"],
+            draft_number=d.get("draft_number"),
             status=d["status"],
             file_count=len(draft_file_ids),
             grouping_reason=d.get("grouping_reason"),
@@ -582,6 +584,7 @@ async def get_draft(draft_id: UUID):
 
     return DraftDetail(
         id=draft["id"],
+        draft_number=draft.get("draft_number"),
         batch_id=draft["batch_id"],
         status=draft["status"],
         shipment_data=_parse_jsonb(draft.get("shipment_data")) or {},
