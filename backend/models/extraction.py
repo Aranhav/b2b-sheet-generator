@@ -18,6 +18,9 @@ class LineItem(BaseModel):
     total_price_usd: ConfidenceValue = ConfidenceValue()
     unit_weight_kg: ConfidenceValue = ConfidenceValue()
     igst_percent: ConfidenceValue = ConfidenceValue()
+    country_of_origin: ConfidenceValue = ConfidenceValue()
+    duty_rate: ConfidenceValue = ConfidenceValue()
+    unit_fob_value: ConfidenceValue = ConfidenceValue()
 
 
 class BoxItem(BaseModel):

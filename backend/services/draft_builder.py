@@ -182,13 +182,13 @@ def _map_boxes(
                 "total_price": _cv_float(matched_li, "total_price_usd") if matched_li else None,
                 "ehsn": _cv(matched_li, "hs_code_origin") if matched_li else "",
                 "ihsn": _cv(matched_li, "hs_code_destination") if matched_li else "",
-                "country_of_origin": _cv(matched_li, "country_of_origin") or "",
+                "country_of_origin": _cv(matched_li, "country_of_origin") or "IN",
                 "category": "",
                 "market_place": "",
                 "igst_amount": _cv_float(matched_li, "igst_percent") if matched_li else None,
-                "duty_rate": None,
+                "duty_rate": _cv_float(matched_li, "duty_rate") if matched_li else None,
                 "vat_rate": None,
-                "unit_fob_value": None,
+                "unit_fob_value": _cv_float(matched_li, "unit_fob_value") if matched_li else None,
                 "fob_value": None,
                 "listing_price": None,
                 "cogs_value": None,
@@ -258,6 +258,10 @@ def _map_products(line_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "product_description": _cv(li, "description") or "",
             "hsn_code": _cv(li, "hs_code_origin", "hs_code_destination") or "",
             "value": _cv_float(li, "total_price_usd") or 0,
+            "country_of_origin": _cv(li, "country_of_origin") or "IN",
+            "unit_price": _cv_float(li, "unit_price_usd"),
+            "duty_rate": _cv_float(li, "duty_rate"),
+            "igst_percent": _cv_float(li, "igst_percent"),
         })
     return products
 

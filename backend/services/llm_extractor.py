@@ -103,7 +103,10 @@ JSON SCHEMA:
         "unit_price_usd": {"value": 12.50, "confidence": 0.95},
         "total_price_usd": {"value": 6250.00, "confidence": 0.97},
         "unit_weight_kg": {"value": 0.35, "confidence": 0.80},
-        "igst_percent": {"value": 18, "confidence": 0.70}
+        "igst_percent": {"value": 18, "confidence": 0.70},
+        "country_of_origin": {"value": "2-letter ISO code e.g. IN, CN, US. Default IN for Indian exports if not specified", "confidence": 0.0-1.0},
+        "duty_rate": {"value": "customs duty rate percentage if mentioned on invoice, else null", "confidence": 0.0-1.0},
+        "unit_fob_value": {"value": "FOB value per unit in USD if mentioned, else null", "confidence": 0.0-1.0}
       }
     ]
   }
@@ -318,6 +321,9 @@ def _parse_line_item(raw: dict[str, Any]) -> LineItem:
         total_price_usd=_parse_confidence_value(raw.get("total_price_usd")),
         unit_weight_kg=_parse_confidence_value(raw.get("unit_weight_kg")),
         igst_percent=_parse_confidence_value(raw.get("igst_percent")),
+        country_of_origin=_parse_confidence_value(raw.get("country_of_origin")),
+        duty_rate=_parse_confidence_value(raw.get("duty_rate")),
+        unit_fob_value=_parse_confidence_value(raw.get("unit_fob_value")),
     )
 
 
