@@ -134,6 +134,29 @@ INSERT INTO shipping_methods (code, name, is_b2b, active) VALUES
   ('AN', 'Xindus B2B Express', true, true)
 ON CONFLICT (code) DO NOTHING;
 
+-- Gaia classification cache
+CREATE TABLE IF NOT EXISTS gaia_classifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  description_hash TEXT NOT NULL,
+  normalized_description TEXT NOT NULL,
+  destination_country TEXT NOT NULL DEFAULT 'US',
+  origin_country TEXT NOT NULL DEFAULT 'IN',
+  ehsn TEXT,
+  ihsn TEXT,
+  duty_rate FLOAT,
+  confidence TEXT,
+  classification_response JSONB,
+  tariff_response JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gaia_desc_dest
+  ON gaia_classifications(description_hash, destination_country, origin_country);
+
+-- Migrate confidence column from FLOAT to TEXT if needed (idempotent)
+DO $$ BEGIN
+  ALTER TABLE gaia_classifications ALTER COLUMN confidence TYPE TEXT USING confidence::TEXT;
+EXCEPTION WHEN others THEN NULL; END $$;
+
 -- Xindus customer linking (idempotent)
 DO $$ BEGIN
   ALTER TABLE sellers ADD COLUMN xindus_customer_id INT DEFAULT NULL;
@@ -922,6 +945,94 @@ async def upsert_xindus_customers(customers: list[dict[str, Any]]) -> int:
             )
             count += 1
     return count
+
+
+# ---------------------------------------------------------------------------
+# Helpers: Gaia classification cache
+# ---------------------------------------------------------------------------
+
+
+async def get_gaia_classification(
+    desc_hash: str, destination: str, origin: str
+) -> dict[str, Any] | None:
+    """Cache lookup for a Gaia classification result."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """SELECT * FROM gaia_classifications
+           WHERE description_hash = $1
+             AND destination_country = $2
+             AND origin_country = $3""",
+        desc_hash,
+        destination,
+        origin,
+    )
+    return dict(row) if row else None
+
+
+async def get_gaia_classifications_batch(
+    desc_hashes: list[str],
+    destination: str,
+    origin: str,
+) -> dict[str, dict[str, Any]]:
+    """Batch cache lookup: fetch all matching Gaia classifications in one query.
+
+    Returns a dict keyed by description_hash for O(1) lookups.
+    """
+    if not desc_hashes:
+        return {}
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT * FROM gaia_classifications
+           WHERE description_hash = ANY($1)
+             AND destination_country = $2
+             AND origin_country = $3""",
+        desc_hashes,
+        destination,
+        origin,
+    )
+    return {row["description_hash"]: dict(row) for row in rows}
+
+
+async def upsert_gaia_classification(
+    desc_hash: str,
+    normalized_description: str,
+    destination: str,
+    origin: str,
+    ehsn: str | None,
+    ihsn: str | None,
+    duty_rate: float | None,
+    confidence: str | None,
+    classification_response: dict[str, Any] | None,
+    tariff_response: dict[str, Any] | None,
+) -> None:
+    """Store or update a Gaia classification result in cache."""
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO gaia_classifications
+             (description_hash, normalized_description, destination_country,
+              origin_country, ehsn, ihsn, duty_rate, confidence,
+              classification_response, tariff_response)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+           ON CONFLICT (description_hash, destination_country, origin_country)
+           DO UPDATE SET
+             ehsn = EXCLUDED.ehsn,
+             ihsn = EXCLUDED.ihsn,
+             duty_rate = EXCLUDED.duty_rate,
+             confidence = EXCLUDED.confidence,
+             classification_response = EXCLUDED.classification_response,
+             tariff_response = EXCLUDED.tariff_response,
+             created_at = NOW()""",
+        desc_hash,
+        normalized_description,
+        destination,
+        origin,
+        ehsn,
+        ihsn,
+        duty_rate,
+        confidence,
+        json.dumps(classification_response) if classification_response else None,
+        json.dumps(tariff_response) if tariff_response else None,
+    )
 
 
 async def upsert_xindus_addresses(addresses: list[dict[str, Any]]) -> int:

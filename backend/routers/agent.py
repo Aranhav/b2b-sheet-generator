@@ -10,6 +10,7 @@ Endpoints:
   POST   /api/agent/drafts/{id}/archive Archive a draft
   POST   /api/agent/drafts/{id}/delete  Permanently delete a draft
   POST   /api/agent/drafts/{id}/re-extract  Re-run extraction on draft files
+  POST   /api/agent/drafts/{id}/classify   Run Gaia tariff classification
   DELETE /api/agent/drafts/{id}        Soft-delete (reject) draft
 """
 from __future__ import annotations
@@ -285,6 +286,29 @@ async def _run_extraction_pipeline(
 
             # Build Xindus-format draft
             shipment_data, confidence_scores = build_draft_shipment(group_files)
+
+            # ── Gaia enrichment: classify items + get tariff data ──
+            try:
+                from backend.services.gaia_enrichment import enrich_items_with_gaia
+
+                receiver = shipment_data.get("receiver_address") or {}
+                dest = (receiver.get("country") or "US").strip().upper()[:2]
+                shipper = shipment_data.get("shipper_address") or {}
+                origin = (shipper.get("country") or "IN").strip().upper()[:2]
+
+                await _send_progress(job_id, batch_id, SSEProgress(
+                    step="enriching",
+                    completed=g_idx,
+                    total=len(shipment_groups),
+                ))
+                shipment_data = await enrich_items_with_gaia(
+                    shipment_data, dest, origin,
+                )
+            except Exception:
+                logger.warning(
+                    "Gaia enrichment failed for group %d, continuing without",
+                    g_idx, exc_info=True,
+                )
 
             # ── Seller intelligence: match/create + apply defaults ──
             seller_id = None
@@ -854,6 +878,27 @@ async def re_extract_draft(draft_id: UUID):
 
     # Save rebuilt data (clears corrected_data)
     await db.update_draft_shipment_data(draft_id, shipment_data, confidence_scores)
+
+    return await get_draft(draft_id)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/agent/drafts/{draft_id}/classify  (Gaia classification)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/drafts/{draft_id}/classify", response_model=DraftDetail)
+async def classify_draft(draft_id: UUID):
+    """Run Gaia classification on all items in a draft."""
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+
+    from backend.services.gaia_enrichment import classify_draft_items
+
+    result = await classify_draft_items(draft_id)
+    if result is None:
+        raise HTTPException(500, "Classification failed")
 
     return await get_draft(draft_id)
 

@@ -23,5 +23,10 @@ S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "")
 S3_BUCKET = os.getenv("S3_BUCKET", "b2b-agent-uploads")
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 
+# Gaia Dynamics (tariff classification)
+GAIA_API_URL = os.getenv("GAIA_API_URL", "https://platform-api.gaiadynamics.ai")
+GAIA_API_KEY = os.getenv("GAIA_API_KEY", "")
+GAIA_TIMEOUT_SECONDS = int(os.getenv("GAIA_TIMEOUT_SECONDS", "30"))
+
 # Xindus B2B API (Phase 3)
 XINDUS_API_URL = os.getenv("XINDUS_API_URL", "")

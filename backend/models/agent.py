@@ -125,7 +125,7 @@ class SellersListResponse(BaseModel):
 
 class SSEProgress(BaseModel):
     """Payload for SSE progress events."""
-    step: str  # classifying, extracting, grouping, building_drafts, complete, error
+    step: str  # classifying, extracting, grouping, building_drafts, enriching, complete, error
     file: Optional[str] = None
     completed: int = 0
     total: int = 0
