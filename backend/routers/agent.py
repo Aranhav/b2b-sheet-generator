@@ -992,7 +992,7 @@ async def download_draft_excel(draft_id: UUID, format: str = "summary"):
     if not draft:
         raise HTTPException(404, "Draft not found")
 
-    data = draft.get("corrected_data") or draft.get("shipment_data")
+    data = _parse_jsonb(draft.get("corrected_data")) or _parse_jsonb(draft.get("shipment_data"))
     if not data:
         raise HTTPException(400, "No shipment data in draft")
 
