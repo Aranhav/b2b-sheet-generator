@@ -118,32 +118,16 @@ async def match_xindus_customer(
 ) -> int | None:
     """Try to find the matching Xindus customer ID for a seller.
 
-    1. Search Metabase customers by company name
+    Searches local xindus_customers table (mirrored from prod).
+    1. Search by company name
     2. If 1 result → return it
     3. If multiple → use Claude Haiku to disambiguate
-    4. Returns None if no match or if Metabase is unavailable
+    4. Returns None if no match
     """
     try:
-        from backend.services.metabase import query_metabase, escape_sql
+        candidates = await db.search_xindus_customers(seller_name, limit=10)
     except Exception:
-        logger.debug("Metabase client not available, skipping Xindus match")
-        return None
-
-    escaped = escape_sql(seller_name)
-    sql = (
-        "SELECT id, company, contact_name, email, iec, gstn, city, state, "
-        "COALESCE(shipment_count, 0) AS shipment_count "
-        "FROM customers "
-        "WHERE status = 'APPROVED' AND company IS NOT NULL "
-        f"AND company LIKE '%{escaped}%' "
-        "ORDER BY COALESCE(shipment_count, 0) DESC "
-        "LIMIT 10"
-    )
-
-    try:
-        candidates = await query_metabase(sql)
-    except Exception:
-        logger.warning("Metabase query failed for Xindus customer match", exc_info=True)
+        logger.warning("Xindus customer search failed", exc_info=True)
         return None
 
     if not candidates:
@@ -153,13 +137,24 @@ async def match_xindus_customer(
         return int(candidates[0]["id"])
 
     # Multiple candidates — try LLM disambiguation
-    picked = await _llm_pick_best_customer(seller_name, shipper_address, candidates)
+    # Map to the format _llm_pick_best_customer expects
+    llm_candidates = [
+        {
+            "id": c["id"],
+            "company": c.get("company_name", ""),
+            "city": None,
+            "state": None,
+            "iec": c.get("iec"),
+            "shipment_count": 0,
+        }
+        for c in candidates
+    ]
+    picked = await _llm_pick_best_customer(seller_name, shipper_address, llm_candidates)
     if picked is not None:
         return picked
 
-    # Fallback: highest shipment_count
-    best = max(candidates, key=lambda c: c.get("shipment_count") or 0)
-    return int(best["id"])
+    # Fallback: first result (best text-search match)
+    return int(candidates[0]["id"])
 
 
 async def _llm_pick_best_customer(

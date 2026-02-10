@@ -156,6 +156,7 @@ class ActiveBatchesResponse(BaseModel):
 
 class XindusCustomer(BaseModel):
     id: int
+    crn_number: str | None = None
     company_name: str
     iec: str | None = None
     gstn: str | None = None

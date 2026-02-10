@@ -142,6 +142,7 @@ EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 -- Xindus customer/address mirror tables (synced from prod via local script)
 CREATE TABLE IF NOT EXISTS xindus_customers (
     id          INTEGER PRIMARY KEY,
+    crn_number  TEXT,
     company_name TEXT NOT NULL,
     iec         TEXT,
     gstn        TEXT,
@@ -151,6 +152,11 @@ CREATE TABLE IF NOT EXISTS xindus_customers (
     created_at  TIMESTAMPTZ DEFAULT now(),
     updated_at  TIMESTAMPTZ DEFAULT now()
 );
+
+-- Add crn_number column if missing (for existing deployments)
+DO $$ BEGIN
+  ALTER TABLE xindus_customers ADD COLUMN crn_number TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS idx_xindus_customers_name
     ON xindus_customers USING gin (to_tsvector('english', company_name));
 
@@ -894,9 +900,10 @@ async def upsert_xindus_customers(customers: list[dict[str, Any]]) -> int:
     async with pool.acquire() as conn:
         for c in customers:
             await conn.execute(
-                """INSERT INTO xindus_customers (id, company_name, iec, gstn, email, phone, status, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                """INSERT INTO xindus_customers (id, crn_number, company_name, iec, gstn, email, phone, status, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
                    ON CONFLICT (id) DO UPDATE SET
+                     crn_number = EXCLUDED.crn_number,
                      company_name = EXCLUDED.company_name,
                      iec = EXCLUDED.iec,
                      gstn = EXCLUDED.gstn,
@@ -905,6 +912,7 @@ async def upsert_xindus_customers(customers: list[dict[str, Any]]) -> int:
                      status = EXCLUDED.status,
                      updated_at = now()""",
                 c["id"],
+                c.get("crn_number"),
                 c["company_name"],
                 c.get("iec"),
                 c.get("gstn"),

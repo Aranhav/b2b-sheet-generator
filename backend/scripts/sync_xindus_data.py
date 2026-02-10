@@ -90,7 +90,7 @@ def main():
     # Fetch customers
     print("Fetching customers...")
     customers_raw = query_metabase(session, """
-        SELECT id, company AS company_name, iec, gstn, email, phone, status
+        SELECT id, crn_number, company AS company_name, iec, gstn, email, phone, status
         FROM customers
         WHERE status = 'APPROVED' AND company IS NOT NULL
     """)
