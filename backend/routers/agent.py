@@ -1273,6 +1273,74 @@ async def list_sellers():
     return SellersListResponse(sellers=sellers)
 
 
+@router.get("/sellers/{seller_id}/history")
+async def get_seller_history(seller_id: UUID):
+    """Return deduplicated products, billing, IOR, and receiver addresses from approved shipments."""
+    seller = await db.get_seller(seller_id)
+    if not seller:
+        raise HTTPException(404, "Seller not found")
+
+    drafts = await db.get_approved_drafts_for_seller(seller_id)
+
+    seen_products: set[str] = set()
+    seen_billing: set[str] = set()
+    seen_ior: set[str] = set()
+    seen_receiver: set[str] = set()
+
+    products: list[dict] = []
+    billing_addresses: list[dict] = []
+    ior_addresses: list[dict] = []
+    receiver_addresses: list[dict] = []
+
+    for d in drafts:
+        sd = _parse_jsonb(d.get("corrected_data")) or _parse_jsonb(d.get("shipment_data")) or {}
+
+        # Products
+        for p in sd.get("product_details", []) or []:
+            desc = (p.get("product_description") or "").strip()
+            hsn = (p.get("hsn_code") or "").strip()
+            if not desc:
+                continue
+            key = f"{desc.lower()}|{hsn.lower()}"
+            if key not in seen_products:
+                seen_products.add(key)
+                products.append({"product_description": desc, "hsn_code": hsn, "value": p.get("value", 0)})
+
+        # Billing address
+        ba = sd.get("billing_address") or {}
+        if ba.get("name"):
+            bkey = f"{ba['name'].lower()}|{(ba.get('city') or '').lower()}|{(ba.get('country') or '').lower()}"
+            if bkey not in seen_billing:
+                seen_billing.add(bkey)
+                billing_addresses.append(ba)
+
+        # IOR address
+        ia = sd.get("ior_address") or {}
+        if ia.get("name"):
+            ikey = f"{ia['name'].lower()}|{(ia.get('city') or '').lower()}|{(ia.get('country') or '').lower()}"
+            if ikey not in seen_ior:
+                seen_ior.add(ikey)
+                ior_addresses.append(ia)
+
+        # Receiver addresses (from boxes + top-level)
+        for addr_src in [sd.get("receiver_address")] + [
+            b.get("receiver_address") for b in (sd.get("shipment_boxes") or [])
+        ]:
+            if not addr_src or not addr_src.get("name"):
+                continue
+            rkey = f"{addr_src['name'].lower()}|{(addr_src.get('city') or '').lower()}|{(addr_src.get('country') or '').lower()}"
+            if rkey not in seen_receiver:
+                seen_receiver.add(rkey)
+                receiver_addresses.append(addr_src)
+
+    return {
+        "products": products,
+        "billing_addresses": billing_addresses,
+        "ior_addresses": ior_addresses,
+        "receiver_addresses": receiver_addresses,
+    }
+
+
 @router.get("/sellers/match", response_model=SellerProfile)
 async def match_seller(name: str):
     """Match a seller by name (exact + fuzzy)."""

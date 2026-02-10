@@ -731,6 +731,23 @@ async def increment_seller_shipment_count(seller_id: UUID) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def get_approved_drafts_for_seller(
+    seller_id: UUID, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Return approved/pushed drafts for a seller, most recent first."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT id, shipment_data, corrected_data, created_at
+           FROM draft_shipments
+           WHERE seller_id = $1 AND status IN ('approved', 'pushed')
+           ORDER BY created_at DESC
+           LIMIT $2""",
+        seller_id,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_shipping_methods(b2b_only: bool = False) -> list[dict]:
     pool = get_pool()
     if b2b_only:
