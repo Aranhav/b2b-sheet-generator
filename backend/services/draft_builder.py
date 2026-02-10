@@ -389,7 +389,7 @@ def build_draft_shipment(
 
     # Build mapped components
     shipper_address = _map_address(invoice_data.get("exporter"))
-    receiver_address = _map_address(
+    invoice_receiver = _map_address(
         invoice_data.get("ship_to") or invoice_data.get("consignee")
     )
     billing_address = _map_address(invoice_data.get("consignee"))
@@ -399,6 +399,14 @@ def build_draft_shipment(
 
     # Determine multi-address delivery
     multi_addr = _check_multi_address(shipment_boxes)
+
+    # Top-level receiver: prefer box[0] receiver (from packing list destinations),
+    # fall back to invoice ship_to/consignee if boxes have no receiver data.
+    box0_receiver = shipment_boxes[0].get("receiver_address", {}) if shipment_boxes else {}
+    if any(v for k, v in box0_receiver.items() if k in ("name", "address", "city", "country") and v):
+        receiver_address = box0_receiver
+    else:
+        receiver_address = invoice_receiver
 
     # Detect country from receiver
     country = receiver_address.get("country", "") or ""

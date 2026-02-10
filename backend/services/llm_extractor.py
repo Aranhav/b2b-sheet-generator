@@ -64,6 +64,11 @@ INSTRUCTIONS:
 - All weights must be in kilograms. Convert if in grams or pounds.
 - All prices should be in USD. If in INR, note the original currency but keep the value as-is.
 - Rate your confidence 0.0-1.0 for each field based on how clearly it appears in the document.
+- ADDRESSES: Extract all 4 addresses carefully. "exporter" is the Indian seller/shipper. \
+"consignee" is the buyer. "ship_to" is the delivery address (may differ from consignee). \
+"ior" is the Importer of Record. If ship_to is not explicitly labeled, check for \
+"deliver to", "ship to", "destination", or warehouse addresses. If ship_to and consignee \
+are the same entity, copy the address to both fields.
 
 Return ONLY a valid JSON object (no markdown fences, no commentary) conforming to \
 the exact schema below. Every leaf value must be a {"value": ..., "confidence": ...} \
@@ -113,8 +118,13 @@ CRITICAL INSTRUCTIONS:
 - ALSO extract the reference fields at the top level (invoice_number, exporter_name, consignee_name) \
 if they appear anywhere on the document -- these are needed to match this packing list to its invoice.
 - Extract ALL boxes from the document. Do NOT truncate or summarize. Every single box must appear.
+- DESTINATIONS ARE CRITICAL: The "destinations" array must ALWAYS have at least one entry. \
+Look for ship-to addresses, consignee addresses, warehouse addresses, or any delivery address on the document. \
+Extract the full name, street address, city, state, zip/postal code, and country.
 - If boxes ship to multiple destinations/warehouses, list each destination in the "destinations" array and reference it from each box via "destination_id".
 - If all boxes go to the same destination, still include it as a single entry in "destinations".
+- If the packing list does not explicitly show a destination address, check headers, footers, \
+or any "ship to" / "deliver to" / "consignee" section. If truly absent, use an empty destination with id "D1".
 - Use FLAT values (plain strings/numbers) to save space -- do NOT use {"value":..., "confidence":...} wrappers.
 - All weights must be in kilograms. Convert if in grams or pounds.
 - All dimensions must be in centimeters. Convert if in inches (multiply by 2.54).
