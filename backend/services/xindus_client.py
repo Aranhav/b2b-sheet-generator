@@ -249,7 +249,7 @@ async def upload_document(
                 headers={"Authorization": f"Bearer {token}"},
             )
 
-    if resp.status_code != 200:
+    if resp.status_code not in (200, 201):
         raise RuntimeError(f"Xindus file upload failed ({resp.status_code}): {resp.text[:300]}")
 
     body = resp.json()

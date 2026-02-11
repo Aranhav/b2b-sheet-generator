@@ -775,32 +775,34 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
         filename = f.get("filename", "document.pdf")
         file_bytes = None
 
-        # Try multiple methods to download the file with retries
+        # Try S3 (authenticated) first, then HTTP as fallback
         if file_url:
-            # Method 1: HTTP download with retries
-            for attempt in range(3):
+            # Method 1: boto3 S3 client (has auth credentials)
+            s3_key = s3_key_from_url(file_url)
+            if s3_key:
                 try:
-                    async with httpx.AsyncClient(timeout=30) as dl_client:
-                        dl_resp = await dl_client.get(file_url)
-                    if dl_resp.status_code == 200:
-                        file_bytes = dl_resp.content
-                        break
-                    logger.warning("HTTP download attempt %d failed (%d) for %s",
-                                   attempt + 1, dl_resp.status_code, filename)
+                    file_bytes = await s3_download(s3_key)
+                    logger.info("S3 download OK for %s (%d bytes)", filename, len(file_bytes))
                 except Exception:
-                    logger.warning("HTTP download attempt %d error for %s",
-                                   attempt + 1, filename)
-                if attempt < 2:
-                    await asyncio.sleep(2 * (attempt + 1))
+                    logger.warning("S3 download failed for %s, trying HTTP", filename)
 
-            # Method 2: boto3 S3 client as fallback
+            # Method 2: HTTP download as fallback (with retries)
             if file_bytes is None:
-                s3_key = s3_key_from_url(file_url)
-                if s3_key:
+                for attempt in range(3):
                     try:
-                        file_bytes = await s3_download(s3_key)
+                        async with httpx.AsyncClient(timeout=30) as dl_client:
+                            dl_resp = await dl_client.get(file_url)
+                        if dl_resp.status_code == 200:
+                            file_bytes = dl_resp.content
+                            logger.info("HTTP download OK for %s (%d bytes)", filename, len(file_bytes))
+                            break
+                        logger.warning("HTTP download attempt %d failed (%d) for %s",
+                                       attempt + 1, dl_resp.status_code, filename)
                     except Exception:
-                        logger.warning("S3 download also failed for %s", filename)
+                        logger.warning("HTTP download attempt %d error for %s",
+                                       attempt + 1, filename)
+                    if attempt < 2:
+                        await asyncio.sleep(2 * (attempt + 1))
 
         if file_bytes is None:
             failed_files.append(filename)
