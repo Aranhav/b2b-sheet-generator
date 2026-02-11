@@ -23,6 +23,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import Response as FastAPIResponse
 from sse_starlette.sse import EventSourceResponse
@@ -749,7 +750,6 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
         raise HTTPException(404, "Draft not found")
 
     from backend.services.xindus_client import submit_b2b_shipment, upload_document
-    from backend.storage import s3_key_from_url, download_file as s3_download
 
     # Upload draft files to Xindus CDN and build "documents" array.
     # Key MUST be "documents" (Xindus @JsonProperty("documents")).
@@ -757,7 +757,7 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
     try:
         draft_files = await db.get_draft_files(draft_id)
         documents = []
-        has_packing = False
+        packing_uploaded = False  # Only true if packing list actually uploaded
         for f in draft_files:
             file_type = f.get("file_type", "invoice") or "invoice"
             # Map our file_type to Xindus doc types
@@ -765,29 +765,35 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
                 doc_type = "invoice"
             elif file_type == "packing_list":
                 doc_type = "packinglist"
-                has_packing = True
             elif file_type == "certificate":
                 doc_type = "document"
             else:
                 doc_type = "document"
 
-            # Download from our S3 and upload to Xindus CDN
+            # Download file via HTTP (more reliable than boto3 within Railway)
             file_url = f.get("file_url", "")
             cdn_url = ""
             if file_url:
-                s3_key = s3_key_from_url(file_url)
-                if s3_key:
-                    try:
-                        file_bytes = await s3_download(s3_key)
+                try:
+                    async with httpx.AsyncClient(timeout=30) as dl_client:
+                        dl_resp = await dl_client.get(file_url)
+                    if dl_resp.status_code == 200:
+                        file_bytes = dl_resp.content
                         cdn_url = await upload_document(
                             file_bytes, f.get("filename", "document.pdf"),
                         )
-                    except Exception:
-                        logger.warning("Failed to upload %s to Xindus CDN", f.get("filename"))
+                    else:
+                        logger.warning("HTTP download failed (%d) for %s",
+                                       dl_resp.status_code, f.get("filename"))
+                except Exception:
+                    logger.warning("Failed to download/upload %s to Xindus CDN",
+                                   f.get("filename"), exc_info=True)
 
             # Skip files without a CDN URL (validateDocsEmpty rejects empty URLs)
             if not cdn_url:
                 continue
+            if file_type == "packing_list":
+                packing_uploaded = True
             documents.append({
                 "id": int(time.time() * 1000) + len(documents),
                 "name": doc_type,
@@ -799,8 +805,8 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
         if not documents:
             logger.warning("No files uploaded to Xindus CDN for draft %s", draft_id)
         body.payload["documents"] = documents
-        # Set invoiceHavePacking based on whether we have a separate packing list
-        body.payload["invoiceHavePacking"] = not has_packing
+        # Only require packing list if it was actually uploaded successfully
+        body.payload["invoiceHavePacking"] = not packing_uploaded
     except Exception:
         logger.exception("Failed to build documents for draft %s", draft_id)
         body.payload["documents"] = []
