@@ -156,7 +156,7 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                     recv = top_recv
                 if is_first:
                     row_data = [
-                        box.get("boxId", box.get("box_id", "")),
+                        box.get("boxId", box.get("box_id", 0)),
                         recv.get("name", ""),
                         recv.get("address", ""),
                         recv.get("city", ""),
@@ -166,10 +166,10 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                         recv.get("phone", ""),
                         recv.get("extensionNumber", recv.get("extension_number", "")),
                         recv.get("email", ""),
-                        box.get("length", ""),
-                        box.get("width", ""),
-                        box.get("height", ""),
-                        box.get("weight", ""),
+                        box.get("length", 0),
+                        box.get("width", 0),
+                        box.get("height", 0),
+                        box.get("weight", 0),
                     ]
                 else:
                     row_data = [""] * box_col_count
@@ -177,28 +177,34 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                 # Single-address: no receiver columns, just box dims
                 if is_first:
                     row_data = [
-                        box.get("boxId", box.get("box_id", "")),
-                        box.get("length", ""),
-                        box.get("width", ""),
-                        box.get("height", ""),
-                        box.get("weight", ""),
+                        box.get("boxId", box.get("box_id", 0)),
+                        box.get("length", 0),
+                        box.get("width", 0),
+                        box.get("height", 0),
+                        box.get("weight", 0),
                     ]
                 else:
                     row_data = [""] * box_col_count
 
             # Item-level columns (same for both formats)
+            # Numeric fields default to 0 (not "") so Excel cells stay NUMERIC.
             row_data.extend([
                 item.get("description", ""),
-                item.get("quantity", ""),
-                item.get("weight", ""),
+                item.get("quantity", 0),
+                item.get("weight", 0),
                 item.get("ehsn", ""),
                 item.get("ihsn", ""),
-                item.get("unitPrice", item.get("unit_price", "")),
-                item.get("igst", item.get("igst_amount", "")),
+                item.get("unitPrice", item.get("unit_price", 0)),
+                item.get("igst", item.get("igst_amount", 0)),
             ])
 
             for ci, val in enumerate(row_data, start=1):
-                cell = ws.cell(row=current_row, column=ci, value=val if val else "")
+                # Use `is not None` — NOT truthiness — to preserve numeric 0.
+                # `0 if 0 else ""` → "" which creates a STRING cell; Xindus Java
+                # parser (Apache POI) throws IllegalStateException on
+                # getNumericCellValue() for STRING cells → XOS-IRE-001.
+                cell = ws.cell(row=current_row, column=ci,
+                               value=val if val is not None else "")
                 cell.alignment = Alignment(vertical="center", wrap_text=True)
 
             current_row += 1
