@@ -747,7 +747,7 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
     if not draft:
         raise HTTPException(404, "Draft not found")
 
-    from backend.services.xindus_client import submit_shipment
+    from backend.services.xindus_client import submit_b2b_shipment
 
     # Create submission record
     submission_id = await db.create_submission(
@@ -757,7 +757,7 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
     )
 
     try:
-        http_status, response_body = await submit_shipment(
+        http_status, response_body = await submit_b2b_shipment(
             body.payload, body.consignor_id,
         )
     except Exception as exc:

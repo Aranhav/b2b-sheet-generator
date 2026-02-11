@@ -1,11 +1,19 @@
-"""Xindus UAT API client — authenticate and submit shipments."""
+"""Xindus UAT API client — authenticate and submit B2B shipments.
+
+Uses the Express-Shipment API (multipart: Excel + JSON) which creates
+proper B2B shipments (b2b_shipment=1, source=B2B).
+"""
 from __future__ import annotations
 
+import json
 import logging
 import time
+from io import BytesIO
 from typing import Any
 
 import httpx
+from openpyxl import Workbook
+from openpyxl.styles import Alignment
 
 from backend.config import XINDUS_UAT_URL, XINDUS_UAT_USERNAME, XINDUS_UAT_PASSWORD
 
@@ -56,30 +64,139 @@ def _clear_token() -> None:
     _token_expires = 0
 
 
-async def submit_shipment(
-    payload: dict[str, Any],
+def _build_excel(shipment_data: dict[str, Any]) -> bytes:
+    """Generate XpressB2B 21-column Excel from shipment_data in memory."""
+    COLUMNS = [
+        "Box Number",
+        "Receiver Name",
+        "Receiver Address",
+        "Receiver City",
+        "Receiver Zip",
+        "Receiver State",
+        "Receiver Country",
+        "Receiver Phone Number",
+        "Receiver Extension No",
+        "Receiver Email",
+        "Box Length (cms)",
+        "Box Width (cms)",
+        "Box Height (cms)",
+        "Box Weight (kgs)",
+        "Item Description",
+        "Item Qty",
+        "Item Unit Weight Kg",
+        "HS Code (Origin)",
+        "HS Code (Destination)",
+        "Item Unit Price",
+        "IGST % (For GST taxtype)",
+    ]
+    BOX_COL_COUNT = 14
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "XpressB2B Multi Address"
+
+    # Header row
+    for ci, h in enumerate(COLUMNS, start=1):
+        ws.cell(row=1, column=ci, value=h)
+
+    # Fallback receiver from top-level
+    top_recv = shipment_data.get("receiver_address", {}) or {}
+    boxes = shipment_data.get("shipment_boxes", []) or []
+
+    current_row = 2
+    for box in boxes:
+        items = box.get("shipment_box_items", []) or [{}]
+        recv = box.get("receiver_address", {}) or {}
+        if not recv.get("name"):
+            recv = top_recv
+
+        for j, item in enumerate(items):
+            is_first = j == 0
+            if is_first:
+                row_data = [
+                    box.get("box_id", ""),
+                    recv.get("name", ""),
+                    recv.get("address", ""),
+                    recv.get("city", ""),
+                    recv.get("zip", ""),
+                    recv.get("state", ""),
+                    recv.get("country", ""),
+                    recv.get("phone", ""),
+                    recv.get("extension_number", ""),
+                    recv.get("email", ""),
+                    box.get("length", ""),
+                    box.get("width", ""),
+                    box.get("height", ""),
+                    box.get("weight", ""),
+                ]
+            else:
+                row_data = [""] * BOX_COL_COUNT
+
+            # Item-level columns (15-21)
+            row_data.extend([
+                item.get("description", ""),
+                item.get("quantity", ""),
+                item.get("weight", ""),
+                item.get("ehsn", ""),
+                item.get("ihsn", ""),
+                item.get("unit_price", ""),
+                item.get("igst_amount", ""),
+            ])
+
+            for ci, val in enumerate(row_data, start=1):
+                cell = ws.cell(row=current_row, column=ci, value=val if val else "")
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+            current_row += 1
+
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def submit_b2b_shipment(
+    shipment_data: dict[str, Any],
     consignor_id: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Submit a shipment to Xindus UAT.
+    """Submit a B2B shipment to Xindus UAT via the Express-Shipment API.
+
+    This uses multipart form data (Excel + JSON) which creates proper B2B
+    shipments (b2b_shipment=1, source=B2B) unlike the Partner API.
 
     Returns (http_status, response_body).
     Retries once on 401 with a fresh token.
     """
-    url = f"{XINDUS_UAT_URL}/xos/api/partner/shipment"
+    # 1. Generate Excel from shipment boxes
+    excel_bytes = _build_excel(shipment_data)
+
+    # 2. Build the express-shipment JSON payload (flat format, no shipment_config wrapper)
+    json_payload = json.dumps(shipment_data)
+
+    # 3. Build URL
+    url = f"{XINDUS_UAT_URL}/api/express-shipment/create"
     if consignor_id:
         url += f"?consignor_id={consignor_id}"
 
     for attempt in range(2):
         token = await _authenticate()
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        # Multipart: box_details_file (Excel) + create_shipment_data (JSON string)
+        files = {
+            "box_details_file": ("uploadedFile.xlsx", excel_bytes,
+                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        }
+        form_data = {
+            "create_shipment_data": json_payload,
+        }
+
+        async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(
                 url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
+                files=files,
+                data=form_data,
+                headers={"Authorization": f"Bearer {token}"},
             )
 
         if resp.status_code == 401 and attempt == 0:
@@ -92,7 +209,8 @@ async def submit_shipment(
         except Exception:
             body = {"raw_response": resp.text[:2000]}
 
+        logger.info("Xindus express-shipment response: %d %s",
+                     resp.status_code, str(body)[:300])
         return resp.status_code, body
 
-    # Should not reach here, but just in case
     return 500, {"error": "Failed after retry"}
