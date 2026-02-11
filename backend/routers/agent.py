@@ -748,46 +748,59 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
     if not draft:
         raise HTTPException(404, "Draft not found")
 
-    from backend.services.xindus_client import submit_b2b_shipment
+    from backend.services.xindus_client import submit_b2b_shipment, upload_document
+    from backend.storage import s3_key_from_url, download_file as s3_download
 
-    # Inject "documents" (Xindus @JsonProperty("documents") → documentsDTOS field)
-    # Key MUST be "documents" not "documentsDTOS" for Spring Boot deserialization.
-    # Every document MUST have a non-empty URL (validateDocsEmpty rejects empty).
-    from backend.storage import s3_key_from_url, generate_presigned_url
+    # Upload draft files to Xindus CDN and build "documents" array.
+    # Key MUST be "documents" (Xindus @JsonProperty("documents")).
+    # Every document MUST have a non-empty CDN URL (validateDocsEmpty rejects empty).
     try:
         draft_files = await db.get_draft_files(draft_id)
         documents = []
         has_packing = False
         for f in draft_files:
             file_type = f.get("file_type", "invoice") or "invoice"
-            doc_type = "invoice" if file_type == "invoice" else file_type
-            if file_type == "packing_list":
+            # Map our file_type to Xindus doc types
+            if file_type == "invoice":
+                doc_type = "invoice"
+            elif file_type == "packing_list":
                 doc_type = "packinglist"
                 has_packing = True
+            elif file_type == "certificate":
+                doc_type = "document"
+            else:
+                doc_type = "document"
+
+            # Download from our S3 and upload to Xindus CDN
             file_url = f.get("file_url", "")
-            # Generate presigned URL so Xindus can access the file
+            cdn_url = ""
             if file_url:
                 s3_key = s3_key_from_url(file_url)
                 if s3_key:
-                    file_url = generate_presigned_url(s3_key, expires_in=3600)
-            # Skip files without a URL (validateDocsEmpty rejects empty URLs)
-            if not file_url:
+                    try:
+                        file_bytes = await s3_download(s3_key)
+                        cdn_url = await upload_document(
+                            file_bytes, f.get("filename", "document.pdf"),
+                        )
+                    except Exception:
+                        logger.warning("Failed to upload %s to Xindus CDN", f.get("filename"))
+
+            # Skip files without a CDN URL (validateDocsEmpty rejects empty URLs)
+            if not cdn_url:
                 continue
             documents.append({
                 "id": int(time.time() * 1000) + len(documents),
                 "name": doc_type,
                 "type": doc_type,
-                "url": file_url,
+                "url": cdn_url,
                 "document_number": "",
             })
-        # Must have at least one invoice entry with a non-empty URL
+        # Must have at least one invoice document
         if not documents:
-            logger.warning("No files with URLs for draft %s — cannot build documents", draft_id)
+            logger.warning("No files uploaded to Xindus CDN for draft %s", draft_id)
         body.payload["documents"] = documents
-        # If we don't have a separate packing list, set invoiceHavePacking=true
-        # so Xindus doesn't require a packinglist document
-        if not has_packing:
-            body.payload["invoiceHavePacking"] = True
+        # Set invoiceHavePacking based on whether we have a separate packing list
+        body.payload["invoiceHavePacking"] = not has_packing
     except Exception:
         logger.exception("Failed to build documents for draft %s", draft_id)
         body.payload["documents"] = []

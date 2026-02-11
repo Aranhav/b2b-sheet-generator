@@ -156,6 +156,57 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
     return buf.getvalue()
 
 
+async def upload_document(
+    file_data: bytes,
+    filename: str,
+    docs_type: str = "FULFIL_LABEL",
+) -> str:
+    """Upload a file to Xindus CDN via POST /xos/api/file.
+
+    Returns the CDN URL string. Xindus stores files at ucdn.xindus.net.
+    """
+    token = await _authenticate()
+    url = f"{XINDUS_UAT_URL}/xos/api/file"
+
+    files = [("file", (filename, file_data, "application/pdf"))]
+    data_fields = {
+        "docs_type": docs_type,
+        "reference_string": "0",
+        "is_private": "false",
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            url,
+            files=files,
+            data=data_fields,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    if resp.status_code == 401:
+        # Retry with fresh token
+        _clear_token()
+        token = await _authenticate()
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                url,
+                files=files,
+                data=data_fields,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Xindus file upload failed ({resp.status_code}): {resp.text[:300]}")
+
+    body = resp.json()
+    raw_data = body.get("data")
+    if isinstance(raw_data, list) and raw_data:
+        cdn_url = raw_data[0]
+        logger.info("Xindus file upload OK: %s → %s", filename, cdn_url)
+        return cdn_url
+    raise RuntimeError(f"No URL in Xindus file upload response: {body}")
+
+
 async def submit_b2b_shipment(
     shipment_data: dict[str, Any],
     consignor_id: int | None = None,
