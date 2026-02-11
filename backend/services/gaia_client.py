@@ -4,7 +4,10 @@ Two-step flow (matching XOS pattern):
   1. classify_autonomous() → IHSN code, confidence, base duty from inline tariff_detail
   2. get_tariff_detail() → full tariff breakdown with tariff_scenario (reciprocal tariffs)
 
-Cumulative duty = base_rate + SUM(scenario.value WHERE is_additional=true)
+Duty calculation (XOS-exact formula):
+  base_rate = SUM(tariff_base[*].rules[*].value WHERE kind="percent")
+  scenario_sum = SUM(tariff_scenario[*].value WHERE is_approved AND is_additional AND value>=0)
+  cumulative_duty = base_rate + scenario_sum
 
 Request format for classification:
   POST /product/classification/tariff-code/autonomous
@@ -56,44 +59,54 @@ def parse_duty_rate(general_duty: str | None) -> float | None:
 def calculate_cumulative_duty(
     tariff_data: dict[str, Any],
 ) -> tuple[float | None, float | None, list[dict[str, Any]]]:
-    """Calculate cumulative duty from tariff-detail response (XOS formula).
+    """Calculate cumulative duty from tariff-detail response (XOS-exact formula).
 
     Returns (base_rate, cumulative_rate, scenario_summaries).
 
     XOS formula:
-      duty_rate = tariff_base[0].rules[0].value
-                + SUM(scenario.value WHERE scenario.tariff.is_additional=true)
+      base_rate = SUM(tariff_base[*].rules[*].value WHERE kind="percent")
+      scenario_sum = SUM(tariff_scenario[*].value
+                         WHERE tariff.is_approved=true
+                           AND tariff.is_additional=true
+                           AND value >= 0)
+      cumulative = base_rate + scenario_sum
     """
-    # Extract base rate from tariff_base
+    # ── Base rate: sum ALL percent rules across ALL tariff_base entries ──
     tariff_base = tariff_data.get("tariff_base") or []
-    base_rate: float | None = None
-    if tariff_base:
-        rules = tariff_base[0].get("rules") or []
-        if rules:
-            rule = rules[0]
+    base_rate_sum = 0.0
+    has_base = False
+
+    for entry in tariff_base:
+        for rule in (entry.get("rules") or []):
             kind = rule.get("kind", "")
             if kind == "percent":
                 try:
-                    base_rate = float(rule.get("value", 0))
+                    base_rate_sum += float(rule.get("value", 0))
+                    has_base = True
                 except (ValueError, TypeError):
                     pass
             elif kind == "free" or str(rule.get("value", "")).strip().lower() == "free":
-                base_rate = 0.0
-        # Fallback: parse from description string
-        if base_rate is None:
-            desc = tariff_base[0].get("description") or ""
-            base_rate = parse_duty_rate(desc)
+                has_base = True  # 0% contribution
+
+    base_rate: float | None = base_rate_sum if has_base else None
+
+    # Fallback: parse from first entry's description string
+    if base_rate is None and tariff_base:
+        desc = tariff_base[0].get("description") or ""
+        base_rate = parse_duty_rate(desc)
 
     if base_rate is None:
         return None, None, []
 
-    # Sum additional tariff scenarios (only is_additional=true)
+    # ── Scenarios: 3-condition filter (XOS-exact) ──
+    # is_approved=true AND is_additional=true AND value>=0
     scenarios = tariff_data.get("tariff_scenario") or []
     additional_sum = 0.0
     scenario_summaries: list[dict[str, Any]] = []
 
     for s in scenarios:
         tariff_info = s.get("tariff") or {}
+        is_approved = tariff_info.get("is_approved", False)
         is_additional = tariff_info.get("is_additional", False)
         is_rumored = tariff_info.get("is_rumored", False)
         value = s.get("value", 0) or 0
@@ -102,13 +115,15 @@ def calculate_cumulative_duty(
             "title": tariff_info.get("title", ""),
             "value": value,
             "is_additional": is_additional,
+            "is_approved": is_approved,
             "is_rumored": is_rumored,
             "tariff_code": tariff_info.get("tariff_code", ""),
             "tariff_category": tariff_info.get("tariff_category", ""),
         }
         scenario_summaries.append(summary)
 
-        if is_additional and value:
+        # XOS 3-condition gate
+        if is_approved and is_additional and value >= 0:
             additional_sum += float(value)
 
     cumulative = round(base_rate + additional_sum, 2)

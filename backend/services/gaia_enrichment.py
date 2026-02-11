@@ -11,13 +11,19 @@ Pipeline (parallel dedup approach with two-step tariff lookup):
   6. Fan results back to ALL items sharing the same normalized description
   7. Cache all new results in DB
 
-Duty calculation (XOS formula):
-  cumulative_duty = base_rate + SUM(scenario.value WHERE is_additional=true)
+Duty calculation (XOS-exact formula):
+  base_rate = SUM(tariff_base[*].rules[*].value WHERE kind="percent")
+  scenario_sum = SUM(tariff_scenario[*].value WHERE is_approved AND is_additional AND value>=0)
+  cumulative_duty = base_rate + scenario_sum
+
+Confidence gate (XOS-exact):
+  Only apply IHSN and tariff data when confidence is HIGH or MEDIUM.
+  LOW or missing confidence → skip IHSN, duty_rate, tariff_scenarios.
 
 Rules:
 - EHSN: keep document-extracted value if non-empty; fall back to Gaia code
-- IHSN: always from Gaia (documents don't have import codes)
-- duty_rate: cumulative duty from tariff-detail (base + reciprocal tariffs)
+- IHSN: from Gaia (only when confidence is HIGH/MEDIUM)
+- duty_rate: cumulative duty from tariff-detail (only when confidence is HIGH/MEDIUM)
 - Cache by normalized description + destination + origin country
 """
 from __future__ import annotations
@@ -36,6 +42,10 @@ from backend.services.gaia_client import parse_duty_rate, calculate_cumulative_d
 from backend.services.description_normalizer import normalize_description
 
 logger = logging.getLogger(__name__)
+
+# XOS confidence gate: only apply IHSN and tariff data for these confidence levels.
+# LOW or missing confidence → skip tariff application entirely.
+_ALLOWED_CONFIDENCES = {"HIGH", "MEDIUM"}
 
 
 # ── Data structures ──────────────────────────────────────────────────────
@@ -159,7 +169,23 @@ def _parse_cached_row(row: dict[str, Any]) -> GaiaResult:
 
 
 def _apply_result(item: dict[str, Any], result: GaiaResult, norm_desc: str) -> None:
-    """Apply a Gaia result to a shipment box item dict, following the rules."""
+    """Apply a Gaia result to a shipment box item dict, following XOS rules.
+
+    Confidence gate (XOS-exact): only apply IHSN and tariff data when
+    confidence is HIGH or MEDIUM. LOW/missing → skip tariff application.
+    """
+    # Always mark as classified and store confidence + description
+    item["gaia_classified"] = True
+    item["gaia_description"] = norm_desc
+    if result.confidence:
+        item["hsn_confidence"] = result.confidence
+
+    # Confidence gate: skip IHSN and tariff data for LOW/missing confidence
+    conf = (result.confidence or "").upper()
+    if conf not in _ALLOWED_CONFIDENCES:
+        logger.debug("Skipping tariff for '%s' (confidence=%s)", norm_desc[:40], conf)
+        return
+
     item["ihsn"] = result.ihsn
     if not item.get("ehsn"):
         item["ehsn"] = result.ehsn_fallback
@@ -171,17 +197,25 @@ def _apply_result(item: dict[str, Any], result: GaiaResult, norm_desc: str) -> N
         item["tariff_scenarios"] = result.tariff_scenarios
     if result.remedy_flags:
         item["remedy_flags"] = result.remedy_flags
-    item["gaia_classified"] = True
-    item["gaia_description"] = norm_desc
-    if result.confidence:
-        item["hsn_confidence"] = result.confidence
 
 
 def _apply_result_to_product(product: dict[str, Any], result: GaiaResult, norm_desc: str) -> None:
     """Apply a Gaia result to a product_details item (customs summary).
 
     product_details uses hsn_code (export HSN) and ihsn (import HSN).
+    Confidence gate (XOS-exact): skip IHSN and tariff for LOW/missing.
     """
+    # Always mark as classified and store confidence
+    product["gaia_classified"] = True
+    product["gaia_description"] = norm_desc
+    if result.confidence:
+        product["hsn_confidence"] = result.confidence
+
+    # Confidence gate
+    conf = (result.confidence or "").upper()
+    if conf not in _ALLOWED_CONFIDENCES:
+        return
+
     product["ihsn"] = result.ihsn
     if not product.get("hsn_code"):
         product["hsn_code"] = result.ehsn_fallback
@@ -191,10 +225,6 @@ def _apply_result_to_product(product: dict[str, Any], result: GaiaResult, norm_d
         product["base_duty_rate"] = result.base_duty_rate
     if result.tariff_scenarios:
         product["tariff_scenarios"] = result.tariff_scenarios
-    product["gaia_classified"] = True
-    product["gaia_description"] = norm_desc
-    if result.confidence:
-        product["hsn_confidence"] = result.confidence
 
 
 # ── Main enrichment (parallel dedup) ────────────────────────────────────
