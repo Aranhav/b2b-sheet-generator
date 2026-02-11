@@ -37,9 +37,11 @@ async def _authenticate() -> str:
         raise RuntimeError(f"Xindus auth failed ({resp.status_code}): {resp.text[:200]}")
 
     data = resp.json()
-    _token = data.get("access_token") or data.get("token")
+    # Token is nested: {"data": [{"access_token": "..."}]}
+    token_data = (data.get("data") or [{}])[0] if isinstance(data.get("data"), list) else data
+    _token = token_data.get("access_token") or data.get("access_token") or data.get("token")
     if not _token:
-        raise RuntimeError(f"No access_token in auth response: {list(data.keys())}")
+        raise RuntimeError(f"No access_token in auth response: {data}")
 
     # Cache for 55 minutes (tokens typically last 1h)
     _token_expires = time.time() + 55 * 60
