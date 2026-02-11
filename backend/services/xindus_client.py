@@ -64,20 +64,18 @@ def _clear_token() -> None:
     _token_expires = 0
 
 
-def _hs_to_int(val: Any) -> int | None:
-    """Convert an HS/HTS code string to integer for Excel.
+def _normalize_hs(val: Any) -> str | None:
+    """Normalize an HS/HTS code string for Excel.
 
-    Xindus POI parser reads HS code columns as NUMERIC cells.
+    Keeps as STRING to preserve leading zeros — Xindus Java parser
+    uses getCellString() which handles both STRING and NUMERIC cells.
+    Export HSN (ehsn) must be exactly 8 characters for validation.
     Returns None for empty/missing values (cell left blank).
     """
     if val is None or val == "":
         return None
-    try:
-        # Strip dots/spaces, convert to int (drops leading zeros but
-        # Xindus stores HS codes as numbers internally anyway).
-        return int(str(val).replace(".", "").replace(" ", ""))
-    except (ValueError, TypeError):
-        return None
+    s = str(val).replace(".", "").replace(" ", "").strip()
+    return s if s else None
 
 
 def _build_excel(shipment_data: dict[str, Any]) -> bytes:
@@ -199,14 +197,15 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                     row_data = [None] * box_col_count
 
             # Item-level columns (same for both formats).
-            # HS codes MUST be written as integers — Xindus POI parser
-            # calls getNumericCellValue() on those columns.
+            # HS codes kept as STRINGS to preserve leading zeros —
+            # Xindus getCellString() handles both STRING and NUMERIC cells,
+            # but ehsn validation requires exactly 8 characters.
             row_data.extend([
                 item.get("description", "") or None,
                 item.get("quantity", 0),
                 item.get("weight", 0) or None,
-                _hs_to_int(item.get("ehsn", "")),
-                _hs_to_int(item.get("ihsn", "")),
+                _normalize_hs(item.get("ehsn", "")),
+                _normalize_hs(item.get("ihsn", "")),
                 item.get("unitPrice", item.get("unit_price", 0)),
                 item.get("igst", item.get("igst_amount", 0)) or None,
             ])
