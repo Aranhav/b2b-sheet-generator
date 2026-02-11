@@ -310,8 +310,12 @@ async def submit_b2b_shipment(
 ) -> tuple[int, dict[str, Any]]:
     """Submit a B2B shipment to Xindus UAT via the Express-Shipment API.
 
-    This uses multipart form data (Excel + JSON) which creates proper B2B
-    shipments (b2b_shipment=1, source=B2B) unlike the Partner API.
+    Xindus B2B creation is a two-step process:
+      1. **Initiate** — POST /initiate with ``initiate_shipment_data``
+         Creates a shipment entry and returns a ``scancode``.
+      2. **Create** — POST /create with ``create_shipment_data``
+         Updates the initiated shipment (looked up by scancode) with
+         full details, charges, docs, etc.
 
     Returns (http_status, response_body).
     Retries once on 401 with a fresh token.
@@ -324,38 +328,74 @@ async def submit_b2b_shipment(
     #    names (e.g. "origin_clearance_type"), so camelCase keys are silently
     #    ignored, leaving fields null and causing NPE in parseShipmentItem().
     snake_data = _to_snake_keys(shipment_data)
-    json_payload = json.dumps(snake_data)
 
-    # 3. Build URL
-    #    NOTE: consignor_id is only valid for FRANCHISEE-type accounts.
-    #    Our UAT user (prasanth.j@xindus.net) is DIRECT, so passing
-    #    consignor_id triggers "Customer type not franchisee" error.
-    #    For DIRECT accounts the shipment is created under the
-    #    authenticated user's customer — no consignor_id needed.
-    url = f"{XINDUS_UAT_URL}/xos/api/express-shipment/create"
+    base_url = f"{XINDUS_UAT_URL}/xos/api/express-shipment"
 
     for attempt in range(2):
         token = await _authenticate()
+        headers = {"Authorization": f"Bearer {token}"}
 
-        # Both parts need explicit Content-Type headers for Spring Boot:
-        # - box_details_file: Excel with spreadsheet MIME type
-        # - create_shipment_data: JSON blob with application/json
-        files = [
+        # ── Step 1: Initiate — create shipment entry, get scancode ──
+        initiate_payload = json.dumps(snake_data)
+        initiate_files = [
             ("box_details_file", ("uploadedFile.xlsx", excel_bytes,
                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
-            ("create_shipment_data", (None, json_payload.encode("utf-8"),
+            ("initiate_shipment_data", (None, initiate_payload.encode("utf-8"),
+                                        "application/json")),
+        ]
+
+        async with httpx.AsyncClient(timeout=90) as client:
+            init_resp = await client.post(
+                f"{base_url}/initiate", files=initiate_files, headers=headers,
+            )
+
+        if init_resp.status_code == 401 and attempt == 0:
+            logger.warning("Xindus initiate returned 401, refreshing token")
+            _clear_token()
+            continue
+
+        try:
+            init_body = init_resp.json()
+        except Exception:
+            init_body = {"raw_response": init_resp.text[:2000]}
+
+        if init_resp.status_code != 200:
+            logger.error("Xindus initiate failed: %d %s",
+                         init_resp.status_code, str(init_body)[:300])
+            return init_resp.status_code, init_body
+
+        # Extract scancode from initiate response
+        # Response shape: {"data": [{"scancode": "DR000000XXX", ...}]}
+        init_data = init_body.get("data", [{}])
+        if isinstance(init_data, list) and init_data:
+            scancode = init_data[0].get("scancode")
+        else:
+            scancode = None
+
+        if not scancode:
+            logger.error("No scancode in initiate response: %s", init_body)
+            return 500, {"error": "Initiate succeeded but no scancode returned",
+                         "initiate_response": init_body}
+
+        logger.info("Xindus initiate OK, scancode=%s", scancode)
+
+        # ── Step 2: Create — update the initiated shipment ──
+        create_data = {**snake_data, "scancode": scancode}
+        create_payload = json.dumps(create_data)
+        create_files = [
+            ("box_details_file", ("uploadedFile.xlsx", excel_bytes,
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            ("create_shipment_data", (None, create_payload.encode("utf-8"),
                                       "application/json")),
         ]
 
         async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(
-                url,
-                files=files,
-                headers={"Authorization": f"Bearer {token}"},
+                f"{base_url}/create", files=create_files, headers=headers,
             )
 
         if resp.status_code == 401 and attempt == 0:
-            logger.warning("Xindus returned 401, refreshing token and retrying")
+            logger.warning("Xindus create returned 401, refreshing token")
             _clear_token()
             continue
 
@@ -364,7 +404,7 @@ async def submit_b2b_shipment(
         except Exception:
             body = {"raw_response": resp.text[:2000]}
 
-        logger.info("Xindus express-shipment response: %d %s",
+        logger.info("Xindus express-shipment create response: %d %s",
                      resp.status_code, str(body)[:300])
         return resp.status_code, body
 
