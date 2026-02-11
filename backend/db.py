@@ -157,8 +157,12 @@ DO $$ BEGIN
   ALTER TABLE gaia_classifications ALTER COLUMN confidence TYPE TEXT USING confidence::TEXT;
 EXCEPTION WHEN others THEN NULL; END $$;
 
--- Clear ALL Gaia cache: duty values were calculated with incorrect logic
--- (missing is_approved filter, single-rule base rate). Force re-classification.
+-- Add llm_normalized column for Claude-enhanced descriptions (idempotent)
+DO $$ BEGIN
+  ALTER TABLE gaia_classifications ADD COLUMN llm_normalized TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+
+-- Clear Gaia cache: re-classify with LLM normalization for better accuracy.
 TRUNCATE gaia_classifications;
 
 -- Xindus customer linking (idempotent)
@@ -1008,6 +1012,7 @@ async def upsert_gaia_classification(
     confidence: str | None,
     classification_response: dict[str, Any] | None,
     tariff_response: dict[str, Any] | None,
+    llm_normalized: str | None = None,
 ) -> None:
     """Store or update a Gaia classification result in cache."""
     pool = get_pool()
@@ -1015,8 +1020,8 @@ async def upsert_gaia_classification(
         """INSERT INTO gaia_classifications
              (description_hash, normalized_description, destination_country,
               origin_country, ehsn, ihsn, duty_rate, confidence,
-              classification_response, tariff_response)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+              classification_response, tariff_response, llm_normalized)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11)
            ON CONFLICT (description_hash, destination_country, origin_country)
            DO UPDATE SET
              ehsn = EXCLUDED.ehsn,
@@ -1025,6 +1030,7 @@ async def upsert_gaia_classification(
              confidence = EXCLUDED.confidence,
              classification_response = EXCLUDED.classification_response,
              tariff_response = EXCLUDED.tariff_response,
+             llm_normalized = EXCLUDED.llm_normalized,
              created_at = NOW()""",
         desc_hash,
         normalized_description,
@@ -1036,6 +1042,7 @@ async def upsert_gaia_classification(
         confidence,
         json.dumps(classification_response) if classification_response else None,
         json.dumps(tariff_response) if tariff_response else None,
+        llm_normalized,
     )
 
 

@@ -39,7 +39,7 @@ from uuid import UUID
 from backend import db
 from backend.services import gaia_client
 from backend.services.gaia_client import parse_duty_rate, calculate_cumulative_duty
-from backend.services.description_normalizer import normalize_description
+from backend.services.description_normalizer import normalize_description, llm_normalize_batch
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ class DescriptionGroup:
     normalized: str
     desc_hash: str
     items: list[ItemRef] = field(default_factory=list)
+    llm_normalized: str = ""  # Claude-enhanced description for Gaia
 
 
 @dataclass
@@ -308,16 +309,40 @@ async def enrich_items_with_gaia(
         else:
             miss_hashes.append(desc_hash)
 
+    # ── Step 3b: LLM-normalize descriptions for cache misses (one batch call) ──
+    if miss_hashes:
+        miss_originals: list[str] = []
+        for h in miss_hashes:
+            g = groups[h]
+            # Use the first item's original description for LLM normalization
+            raw = g.items[0].original_description if g.items else g.normalized
+            miss_originals.append(raw)
+
+        llm_map = await llm_normalize_batch(miss_originals)
+
+        # Assign LLM-normalized descriptions to groups
+        for h, raw in zip(miss_hashes, miss_originals):
+            g = groups[h]
+            g.llm_normalized = llm_map.get(raw, "")
+            if g.llm_normalized:
+                logger.info(
+                    "LLM normalize: '%s' → '%s' (regex: '%s')",
+                    raw[:50], g.llm_normalized, g.normalized[:50],
+                )
+
     # ── Step 4: Classify + tariff lookup in PARALLEL for cache misses ──
     if miss_hashes:
         async def _classify_and_lookup(h: str) -> tuple[str, GaiaResult | None]:
             """Two-step: classify → tariff detail → cumulative duty."""
             g = groups[h]
 
+            # Use LLM-normalized description for Gaia if available, else regex
+            gaia_desc = g.llm_normalized or g.normalized
+
             # Step 4a: Classify to get IHSN code
             classification = await gaia_client.classify_autonomous(
-                name=g.normalized,
-                description=g.normalized,
+                name=gaia_desc,
+                description=gaia_desc,
                 destination_country=destination_country,
             )
             if not classification:
@@ -361,6 +386,7 @@ async def enrich_items_with_gaia(
                         confidence=parsed.confidence,
                         classification_response=parsed.gaia_response,
                         tariff_response=parsed.tariff_response,
+                        llm_normalized=g.llm_normalized or None,
                     )
                 except Exception:
                     logger.warning("Failed to cache Gaia result for hash %s", h[:12], exc_info=True)
