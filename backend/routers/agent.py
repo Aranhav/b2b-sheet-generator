@@ -750,46 +750,48 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
 
     from backend.services.xindus_client import submit_b2b_shipment
 
-    # Inject documentsDTOS from draft files (Xindus requires at least one document)
+    # Inject "documents" (Xindus @JsonProperty("documents") → documentsDTOS field)
+    # Key MUST be "documents" not "documentsDTOS" for Spring Boot deserialization.
+    # Every document MUST have a non-empty URL (validateDocsEmpty rejects empty).
+    from backend.storage import s3_key_from_url, generate_presigned_url
     try:
         draft_files = await db.get_draft_files(draft_id)
-        documents_dtos = []
+        documents = []
+        has_packing = False
         for f in draft_files:
             file_type = f.get("file_type", "invoice") or "invoice"
             doc_type = "invoice" if file_type == "invoice" else file_type
+            if file_type == "packing_list":
+                doc_type = "packinglist"
+                has_packing = True
             file_url = f.get("file_url", "")
-            # Generate presigned URL if we have an S3 file
+            # Generate presigned URL so Xindus can access the file
             if file_url:
-                from backend.storage import s3_key_from_url, generate_presigned_url
                 s3_key = s3_key_from_url(file_url)
                 if s3_key:
                     file_url = generate_presigned_url(s3_key, expires_in=3600)
-            documents_dtos.append({
-                "id": int(time.time() * 1000) + len(documents_dtos),
+            # Skip files without a URL (validateDocsEmpty rejects empty URLs)
+            if not file_url:
+                continue
+            documents.append({
+                "id": int(time.time() * 1000) + len(documents),
                 "name": doc_type,
                 "type": doc_type,
                 "url": file_url,
-                "documentNumber": "",
+                "document_number": "",
             })
-        # Ensure at least one invoice entry exists
-        if not documents_dtos:
-            documents_dtos.append({
-                "id": int(time.time() * 1000),
-                "name": "invoice",
-                "type": "invoice",
-                "url": "",
-                "documentNumber": "",
-            })
-        body.payload["documentsDTOS"] = documents_dtos
+        # Must have at least one invoice entry with a non-empty URL
+        if not documents:
+            logger.warning("No files with URLs for draft %s — cannot build documents", draft_id)
+        body.payload["documents"] = documents
+        # If we don't have a separate packing list, set invoiceHavePacking=true
+        # so Xindus doesn't require a packinglist document
+        if not has_packing:
+            body.payload["invoiceHavePacking"] = True
     except Exception:
-        logger.warning("Failed to build documentsDTOS for draft %s, using empty", draft_id)
-        body.payload["documentsDTOS"] = [{
-            "id": int(time.time() * 1000),
-            "name": "invoice",
-            "type": "invoice",
-            "url": "",
-            "documentNumber": "",
-        }]
+        logger.exception("Failed to build documents for draft %s", draft_id)
+        body.payload["documents"] = []
+        body.payload["invoiceHavePacking"] = True
 
     # Create submission record
     submission_id = await db.create_submission(
