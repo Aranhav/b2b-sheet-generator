@@ -65,82 +65,136 @@ def _clear_token() -> None:
 
 
 def _build_excel(shipment_data: dict[str, Any]) -> bytes:
-    """Generate XpressB2B 21-column Excel from shipment_data in memory."""
-    COLUMNS = [
-        "Box Number",
-        "Receiver Name",
-        "Receiver Address",
-        "Receiver City",
-        "Receiver Zip",
-        "Receiver State",
-        "Receiver Country",
-        "Receiver Phone Number",
-        "Receiver Extension No",
-        "Receiver Email",
-        "Box Length (cms)",
-        "Box Width (cms)",
-        "Box Height (cms)",
-        "Box Weight (kgs)",
-        "Item Description",
-        "Item Qty",
-        "Item Unit Weight Kg",
-        "HS Code (Origin)",
-        "HS Code (Destination)",
-        "Item Unit Price",
-        "IGST % (For GST taxtype)",
-    ]
-    BOX_COL_COUNT = 14
+    """Generate XpressB2B Excel from shipment_data.
+
+    Xindus validates headers strictly:
+    - Single-address (multiAddressDestinationDelivery=false): 12 columns, no receiver cols
+    - Multi-address  (multiAddressDestinationDelivery=true):  21 columns, with receiver cols
+    Header names must include (R) suffixes where required.
+    """
+    # Detect mode from the payload (camelCase key from frontend)
+    multi_addr = shipment_data.get("multiAddressDestinationDelivery", False)
+
+    # Also check snake_case variant for safety
+    if not multi_addr:
+        multi_addr = shipment_data.get("multi_address_destination_delivery", False)
+
+    if multi_addr:
+        columns = [
+            "Box Number (R)",
+            "Receiver Name (R)",
+            "Receiver Address",
+            "Receiver City",
+            "Receiver Zip",
+            "Receiver State",
+            "Receiver Country",
+            "Receiver Phone Number",
+            "Receiver Extension No",
+            "Receiver Email",
+            "Box Length (cms)",
+            "Box Width (cms)",
+            "Box Height (cms)",
+            "Box Weight (kgs)",
+            "Item Description",
+            "Item Qty",
+            "Item Unit Weight Kg",
+            "HS Code (Origin)",
+            "HS Code (Destination)",
+            "Item Unit Price",
+            "IGST % (For GST taxtype)",
+        ]
+        sheet_title = "XpressB2B Multi Address"
+        box_col_count = 14  # box-level columns before items
+    else:
+        columns = [
+            "Box Number (R)",
+            "Box Length(cms)(R)",
+            "Box Width(cms)",
+            "Box Height(cms)",
+            "Box Weight(kgs)",
+            "Item Description",
+            "Item Qty",
+            "Item Unit Weight Kg",
+            "HS Code (Origin)",
+            "HS Code (Destination)",
+            "Item Unit Price",
+            "IGST % (For GST taxtype)",
+        ]
+        sheet_title = "XpressB2B"
+        box_col_count = 5  # box-level columns before items
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "XpressB2B Multi Address"
+    ws.title = sheet_title
 
     # Header row
-    for ci, h in enumerate(COLUMNS, start=1):
+    for ci, h in enumerate(columns, start=1):
         ws.cell(row=1, column=ci, value=h)
 
-    # Fallback receiver from top-level
-    top_recv = shipment_data.get("receiver_address", {}) or {}
-    boxes = shipment_data.get("shipment_boxes", []) or []
+    # Fallback receiver from top-level (camelCase from frontend payload)
+    top_recv = shipment_data.get("receiverAddress", {}) or {}
+    # Also try snake_case
+    if not top_recv:
+        top_recv = shipment_data.get("receiver_address", {}) or {}
+    boxes = (shipment_data.get("shipmentBoxes", [])
+             or shipment_data.get("shipment_boxes", [])
+             or [])
 
     current_row = 2
     for box in boxes:
-        items = box.get("shipment_box_items", []) or [{}]
-        recv = box.get("receiver_address", {}) or {}
-        if not recv.get("name"):
-            recv = top_recv
+        items = (box.get("shipmentBoxItems", [])
+                 or box.get("shipment_box_items", [])
+                 or [{}])
 
         for j, item in enumerate(items):
             is_first = j == 0
-            if is_first:
-                row_data = [
-                    box.get("box_id", ""),
-                    recv.get("name", ""),
-                    recv.get("address", ""),
-                    recv.get("city", ""),
-                    recv.get("zip", ""),
-                    recv.get("state", ""),
-                    recv.get("country", ""),
-                    recv.get("phone", ""),
-                    recv.get("extension_number", ""),
-                    recv.get("email", ""),
-                    box.get("length", ""),
-                    box.get("width", ""),
-                    box.get("height", ""),
-                    box.get("weight", ""),
-                ]
-            else:
-                row_data = [""] * BOX_COL_COUNT
 
-            # Item-level columns (15-21)
+            if multi_addr:
+                # Multi-address: receiver info per box row
+                recv = box.get("receiverAddress", {}) or box.get("receiver_address", {}) or {}
+                if not recv.get("name"):
+                    recv = top_recv
+                if is_first:
+                    row_data = [
+                        box.get("boxId", box.get("box_id", "")),
+                        recv.get("name", ""),
+                        recv.get("address", ""),
+                        recv.get("city", ""),
+                        recv.get("zip", ""),
+                        recv.get("state", ""),
+                        recv.get("country", ""),
+                        recv.get("phone", ""),
+                        recv.get("extensionNumber", recv.get("extension_number", "")),
+                        recv.get("email", ""),
+                        box.get("length", ""),
+                        box.get("width", ""),
+                        box.get("height", ""),
+                        box.get("weight", ""),
+                    ]
+                else:
+                    row_data = [""] * box_col_count
+            else:
+                # Single-address: no receiver columns, just box dims
+                if is_first:
+                    row_data = [
+                        box.get("boxId", box.get("box_id", "")),
+                        box.get("length", ""),
+                        box.get("width", ""),
+                        box.get("height", ""),
+                        box.get("weight", ""),
+                    ]
+                else:
+                    row_data = [""] * box_col_count
+
+            # Item-level columns (same for both formats)
             row_data.extend([
                 item.get("description", ""),
                 item.get("quantity", ""),
                 item.get("weight", ""),
                 item.get("ehsn", ""),
                 item.get("ihsn", ""),
-                item.get("unit_price", ""),
-                item.get("igst_amount", ""),
+                item.get("unitPrice", item.get("unit_price", "")),
+                item.get("igst", item.get("igst_amount", "")),
             ])
 
             for ci, val in enumerate(row_data, start=1):
