@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from io import BytesIO
 from typing import Any
@@ -76,6 +77,33 @@ def _normalize_hs(val: Any) -> str | None:
         return None
     s = str(val).replace(".", "").replace(" ", "").strip()
     return s if s else None
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert a camelCase key to snake_case.
+
+    Examples: shippingMethod → shipping_method,
+              amazonFba → amazon_fba,
+              extensionNumber → extension_number.
+    Single-word keys (name, email, country) pass through unchanged.
+    """
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    return s.lower()
+
+
+def _to_snake_keys(obj: Any) -> Any:
+    """Recursively convert all dict keys from camelCase to snake_case.
+
+    The Xindus Express-Shipment DTO uses @JsonProperty with snake_case
+    names (e.g. "origin_clearance_type", "shipper_address").  Our frontend
+    and draft storage use camelCase.  This function bridges the gap.
+    """
+    if isinstance(obj, dict):
+        return {_camel_to_snake(k): _to_snake_keys(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_snake_keys(item) for item in obj]
+    return obj
 
 
 def _build_excel(shipment_data: dict[str, Any]) -> bytes:
@@ -288,11 +316,15 @@ async def submit_b2b_shipment(
     Returns (http_status, response_body).
     Retries once on 401 with a fresh token.
     """
-    # 1. Generate Excel from shipment boxes
+    # 1. Generate Excel from shipment boxes (handles both camelCase and snake_case)
     excel_bytes = _build_excel(shipment_data)
 
-    # 2. Build the express-shipment JSON payload (flat format, no shipment_config wrapper)
-    json_payload = json.dumps(shipment_data)
+    # 2. Convert camelCase keys → snake_case for Xindus DTO.
+    #    The Java B2BShipmentCreateRequestDTO uses @JsonProperty with snake_case
+    #    names (e.g. "origin_clearance_type"), so camelCase keys are silently
+    #    ignored, leaving fields null and causing NPE in parseShipmentItem().
+    snake_data = _to_snake_keys(shipment_data)
+    json_payload = json.dumps(snake_data)
 
     # 3. Build URL
     url = f"{XINDUS_UAT_URL}/xos/api/express-shipment/create"
