@@ -175,7 +175,7 @@ async def submit_b2b_shipment(
     json_payload = json.dumps(shipment_data)
 
     # 3. Build URL
-    url = f"{XINDUS_UAT_URL}/api/express-shipment/create"
+    url = f"{XINDUS_UAT_URL}/xos/api/express-shipment/create"
     if consignor_id:
         url += f"?consignor_id={consignor_id}"
 
