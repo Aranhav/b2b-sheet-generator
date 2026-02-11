@@ -182,20 +182,20 @@ async def submit_b2b_shipment(
     for attempt in range(2):
         token = await _authenticate()
 
-        # Multipart: box_details_file (Excel) + create_shipment_data (JSON string)
-        files = {
-            "box_details_file": ("uploadedFile.xlsx", excel_bytes,
-                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-        }
-        form_data = {
-            "create_shipment_data": json_payload,
-        }
+        # Both parts need explicit Content-Type headers for Spring Boot:
+        # - box_details_file: Excel with spreadsheet MIME type
+        # - create_shipment_data: JSON blob with application/json
+        files = [
+            ("box_details_file", ("uploadedFile.xlsx", excel_bytes,
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            ("create_shipment_data", (None, json_payload.encode("utf-8"),
+                                      "application/json")),
+        ]
 
         async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(
                 url,
                 files=files,
-                data=form_data,
                 headers={"Authorization": f"Bearer {token}"},
             )
 
