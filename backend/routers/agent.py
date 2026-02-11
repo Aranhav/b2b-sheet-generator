@@ -11,6 +11,7 @@ Endpoints:
   POST   /api/agent/drafts/{id}/delete  Permanently delete a draft
   POST   /api/agent/drafts/{id}/re-extract  Re-run extraction on draft files
   POST   /api/agent/drafts/{id}/classify   Run Gaia tariff classification
+  POST   /api/agent/tariff-lookup          Tariff detail lookup for a single HTS code
   DELETE /api/agent/drafts/{id}        Soft-delete (reject) draft
 """
 from __future__ import annotations
@@ -901,6 +902,51 @@ async def classify_draft(draft_id: UUID):
         raise HTTPException(500, "Classification failed")
 
     return await get_draft(draft_id)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/agent/tariff-lookup  (single HTS code tariff detail)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/tariff-lookup")
+async def tariff_lookup(body: dict):
+    """Look up tariff detail for a single HTS code.
+
+    Body: {tariff_code: str, destination_country: str, origin_country: str}
+    Returns duty breakdown with base rate, cumulative rate, and scenarios.
+    """
+    tariff_code = (body.get("tariff_code") or "").strip()
+    destination = (body.get("destination_country") or "US").strip().upper()[:2]
+    origin = (body.get("origin_country") or "IN").strip().upper()[:2]
+
+    if not tariff_code:
+        raise HTTPException(400, "tariff_code is required")
+
+    from backend.services.gaia_client import get_tariff_detail, calculate_cumulative_duty
+
+    tariff_data = await get_tariff_detail(destination, tariff_code, origin)
+    if not tariff_data:
+        raise HTTPException(404, f"No tariff data for {tariff_code} ({origin}→{destination})")
+
+    base_rate, cumulative_rate, scenarios = calculate_cumulative_duty(tariff_data)
+
+    # Extract remedy flags
+    remedy_flags: dict = {}
+    for flag in tariff_data.get("flags") or []:
+        if flag.get("name") == "remedy":
+            val = flag.get("value") or {}
+            remedy_flags = {
+                "add_risk": bool(val.get("possible_add_required_indicator")),
+                "cvd_risk": bool(val.get("possible_cvd_duty_required_indicator")),
+            }
+
+    return {
+        "duty_rate": cumulative_rate,
+        "base_duty_rate": base_rate,
+        "tariff_scenarios": scenarios,
+        "remedy_flags": remedy_flags,
+    }
 
 
 # ---------------------------------------------------------------------------
