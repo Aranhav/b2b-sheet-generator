@@ -154,6 +154,29 @@ class ActiveBatchesResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Xindus submission models
+# ---------------------------------------------------------------------------
+
+
+class SubmitToXindusRequest(BaseModel):
+    """Body for POST /api/agent/drafts/{draft_id}/submit-xindus."""
+    payload: dict[str, Any]
+    consignor_id: Optional[int] = None
+
+
+class SubmissionResult(BaseModel):
+    """Response from submitting to Xindus."""
+    submission_id: UUID
+    success: bool
+    http_status: int
+    scancode: Optional[str] = None
+    error_code: Optional[str] = None
+    error_description: Optional[str] = None
+    response: Optional[dict[str, Any]] = None
+    has_label: bool = False
+
+
 class XindusCustomer(BaseModel):
     id: int
     crn_number: str | None = None

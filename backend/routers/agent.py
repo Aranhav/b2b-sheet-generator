@@ -41,6 +41,8 @@ from backend.models.agent import (
     SellerProfile,
     SellersListResponse,
     SSEProgress,
+    SubmissionResult,
+    SubmitToXindusRequest,
     UploadResponse,
     XindusAddress,
     XindusCustomer,
@@ -730,6 +732,112 @@ async def approve_draft(draft_id: UUID):
         draft_id=draft_id,
         xindus_scancode=None,
         message="Draft approved. Xindus API integration coming in Phase 3.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/agent/drafts/{draft_id}/submit-xindus
+# ---------------------------------------------------------------------------
+
+
+@router.post("/drafts/{draft_id}/submit-xindus", response_model=SubmissionResult)
+async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
+    """Submit a shipment payload to Xindus UAT and log the result."""
+    draft = await db.get_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Draft not found")
+
+    from backend.services.xindus_client import submit_shipment
+
+    # Create submission record
+    submission_id = await db.create_submission(
+        draft_id=draft_id,
+        environment="uat",
+        request_payload=body.payload,
+    )
+
+    try:
+        http_status, response_body = await submit_shipment(
+            body.payload, body.consignor_id,
+        )
+    except Exception as exc:
+        logger.exception("Xindus submission failed for draft %s", draft_id)
+        await db.update_submission_result(
+            submission_id,
+            http_status=500,
+            response_payload={"error": str(exc)},
+            status="error",
+        )
+        return SubmissionResult(
+            submission_id=submission_id,
+            success=False,
+            http_status=500,
+            error_description=str(exc),
+        )
+
+    # Determine success
+    success = 200 <= http_status < 300
+    scancode = response_body.get("scancode") or response_body.get("data", {}).get("scancode") if success else None
+    label_b64 = response_body.get("label") or response_body.get("data", {}).get("label")
+    error_desc = None
+    error_code = None
+    if not success:
+        error_desc = (
+            response_body.get("error_description")
+            or response_body.get("message")
+            or response_body.get("error")
+            or str(response_body)
+        )
+        error_code = response_body.get("error_code") or response_body.get("code")
+
+    await db.update_submission_result(
+        submission_id,
+        http_status=http_status,
+        response_payload=response_body,
+        xindus_scancode=scancode,
+        label_base64=label_b64,
+        status="success" if success else "error",
+    )
+
+    # If successful, update draft status
+    if success and scancode:
+        await db.update_draft_pushed(draft_id, scancode)
+
+    return SubmissionResult(
+        submission_id=submission_id,
+        success=success,
+        http_status=http_status,
+        scancode=scancode,
+        error_code=error_code,
+        error_description=error_desc,
+        response=response_body,
+        has_label=bool(label_b64),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/agent/submissions/{submission_id}/label
+# ---------------------------------------------------------------------------
+
+
+@router.get("/submissions/{submission_id}/label")
+async def get_submission_label(submission_id: UUID):
+    """Return the base64-decoded PDF label for a submission."""
+    import base64
+
+    submission = await db.get_submission(submission_id)
+    if not submission:
+        raise HTTPException(404, "Submission not found")
+
+    label_b64 = submission.get("label_base64")
+    if not label_b64:
+        raise HTTPException(404, "No label available for this submission")
+
+    pdf_bytes = base64.b64decode(label_b64)
+    return FastAPIResponse(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="label_{submission_id}.pdf"'},
     )
 
 

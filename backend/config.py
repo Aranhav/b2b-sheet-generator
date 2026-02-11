@@ -31,6 +31,11 @@ GAIA_TIMEOUT_SECONDS = int(os.getenv("GAIA_TIMEOUT_SECONDS", "30"))
 # Xindus B2B API (Phase 3)
 XINDUS_API_URL = os.getenv("XINDUS_API_URL", "")
 
+# Xindus UAT API (for test submissions)
+XINDUS_UAT_URL = os.getenv("XINDUS_UAT_URL", "https://uat.xindus.net")
+XINDUS_UAT_USERNAME = os.getenv("XINDUS_UAT_USERNAME", "")
+XINDUS_UAT_PASSWORD = os.getenv("XINDUS_UAT_PASSWORD", "")
+
 
 # ── Country code normalization ──────────────────────────────────────────
 # Maps common country names/variants to ISO 3166-1 alpha-2 codes.

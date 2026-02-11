@@ -210,6 +210,21 @@ CREATE TABLE IF NOT EXISTS xindus_addresses (
 );
 CREATE INDEX IF NOT EXISTS idx_xindus_addresses_customer
     ON xindus_addresses(customer_id);
+
+-- Shipment submission log (UAT/prod submit attempts)
+CREATE TABLE IF NOT EXISTS shipment_submissions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  draft_id UUID NOT NULL REFERENCES draft_shipments(id) ON DELETE CASCADE,
+  environment TEXT NOT NULL DEFAULT 'uat',
+  request_payload JSONB,
+  response_payload JSONB,
+  http_status INT,
+  xindus_scancode TEXT,
+  label_base64 TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_submissions_draft ON shipment_submissions(draft_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -1044,6 +1059,62 @@ async def upsert_gaia_classification(
         json.dumps(tariff_response) if tariff_response else None,
         llm_normalized,
     )
+
+
+# ---------------------------------------------------------------------------
+# Helpers: Shipment submissions
+# ---------------------------------------------------------------------------
+
+
+async def create_submission(
+    draft_id: UUID,
+    environment: str,
+    request_payload: dict[str, Any],
+) -> UUID:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """INSERT INTO shipment_submissions (draft_id, environment, request_payload, status)
+           VALUES ($1, $2, $3::jsonb, 'pending') RETURNING id""",
+        draft_id,
+        environment,
+        json.dumps(request_payload),
+    )
+    return row["id"]
+
+
+async def update_submission_result(
+    submission_id: UUID,
+    *,
+    http_status: int,
+    response_payload: dict[str, Any] | None = None,
+    xindus_scancode: str | None = None,
+    label_base64: str | None = None,
+    status: str = "completed",
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """UPDATE shipment_submissions
+           SET http_status = $2,
+               response_payload = $3::jsonb,
+               xindus_scancode = $4,
+               label_base64 = $5,
+               status = $6
+           WHERE id = $1""",
+        submission_id,
+        http_status,
+        json.dumps(response_payload) if response_payload else None,
+        xindus_scancode,
+        label_base64,
+        status,
+    )
+
+
+async def get_submission(submission_id: UUID) -> dict[str, Any] | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM shipment_submissions WHERE id = $1", submission_id
+    )
+    return dict(row) if row else None
 
 
 async def upsert_xindus_addresses(addresses: list[dict[str, Any]]) -> int:
