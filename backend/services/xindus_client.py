@@ -70,7 +70,10 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
     Xindus validates headers strictly:
     - Single-address (multiAddressDestinationDelivery=false): 12 columns, no receiver cols
     - Multi-address  (multiAddressDestinationDelivery=true):  21 columns, with receiver cols
-    Header names must include (R) suffixes where required.
+    Header names must match exactly (no (R)/(O) suffixes — those are only in
+    the CSB-V bulk-upload template, NOT the Express-Shipment format).
+    Box number (and receiver in multi-address) repeat on every row;
+    box dimensions only appear on the first item row per box.
     """
     # Detect mode from the payload (camelCase key from frontend)
     multi_addr = shipment_data.get("multiAddressDestinationDelivery", False)
@@ -81,8 +84,8 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
 
     if multi_addr:
         columns = [
-            "Box Number (R)",
-            "Receiver Name (R)",
+            "Box Number",
+            "Receiver Name",
             "Receiver Address",
             "Receiver City",
             "Receiver Zip",
@@ -104,14 +107,13 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
             "IGST % (For GST taxtype)",
         ]
         sheet_title = "XpressB2B Multi Address"
-        box_col_count = 14  # box-level columns before items
     else:
         columns = [
-            "Box Number (R)",
-            "Box Length(cms)(R)",
-            "Box Width(cms)",
-            "Box Height(cms)",
-            "Box Weight(kgs)",
+            "Box Number",
+            "Box Length (cms)",
+            "Box Width (cms)",
+            "Box Height (cms)",
+            "Box Weight (kgs)",
             "Item Description",
             "Item Qty",
             "Item Unit Weight Kg",
@@ -121,7 +123,6 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
             "IGST % (For GST taxtype)",
         ]
         sheet_title = "XpressB2B"
-        box_col_count = 5  # box-level columns before items
 
     wb = Workbook()
     ws = wb.active
@@ -146,45 +147,43 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                  or box.get("shipment_box_items", [])
                  or [{}])
 
+        box_id = str(box.get("boxId", box.get("box_id", 0)))
+
         for j, item in enumerate(items):
             is_first = j == 0
 
             if multi_addr:
-                # Multi-address: receiver info per box row
+                # Multi-address: box number + receiver on EVERY row,
+                # dimensions only on the first item row per box.
                 recv = box.get("receiverAddress", {}) or box.get("receiver_address", {}) or {}
                 if not recv.get("name"):
                     recv = top_recv
-                if is_first:
-                    row_data = [
-                        box.get("boxId", box.get("box_id", 0)),
-                        recv.get("name", ""),
-                        recv.get("address", ""),
-                        recv.get("city", ""),
-                        recv.get("zip", ""),
-                        recv.get("state", ""),
-                        recv.get("country", ""),
-                        recv.get("phone", ""),
-                        recv.get("extensionNumber", recv.get("extension_number", "")),
-                        recv.get("email", ""),
-                        box.get("length", 0),
-                        box.get("width", 0),
-                        box.get("height", 0),
-                        box.get("weight", 0),
-                    ]
-                else:
-                    row_data = [""] * box_col_count
+                row_data = [
+                    box_id,
+                    recv.get("name", ""),
+                    recv.get("address", ""),
+                    recv.get("city", ""),
+                    recv.get("zip", ""),
+                    recv.get("state", ""),
+                    recv.get("country", ""),
+                    recv.get("phone", ""),
+                    recv.get("extensionNumber", recv.get("extension_number", "")),
+                    recv.get("email", ""),
+                    box.get("length", 0) if is_first else None,
+                    box.get("width", 0) if is_first else None,
+                    box.get("height", 0) if is_first else None,
+                    box.get("weight", 0) if is_first else None,
+                ]
             else:
-                # Single-address: no receiver columns, just box dims
-                if is_first:
-                    row_data = [
-                        box.get("boxId", box.get("box_id", 0)),
-                        box.get("length", 0),
-                        box.get("width", 0),
-                        box.get("height", 0),
-                        box.get("weight", 0),
-                    ]
-                else:
-                    row_data = [""] * box_col_count
+                # Single-address: box number on every row,
+                # dimensions only on the first item row per box.
+                row_data = [
+                    box_id,
+                    box.get("length", 0) if is_first else None,
+                    box.get("width", 0) if is_first else None,
+                    box.get("height", 0) if is_first else None,
+                    box.get("weight", 0) if is_first else None,
+                ]
 
             # Item-level columns (same for both formats)
             # Numeric fields default to 0 (not "") so Excel cells stay NUMERIC.
@@ -199,12 +198,12 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
             ])
 
             for ci, val in enumerate(row_data, start=1):
-                # Use `is not None` — NOT truthiness — to preserve numeric 0.
-                # `0 if 0 else ""` → "" which creates a STRING cell; Xindus Java
-                # parser (Apache POI) throws IllegalStateException on
-                # getNumericCellValue() for STRING cells → XOS-IRE-001.
-                cell = ws.cell(row=current_row, column=ci,
-                               value=val if val is not None else "")
+                # Skip None — leaves cell truly empty (no type) so POI
+                # doesn't choke on STRING where NUMERIC is expected.
+                # Use `is not None` to preserve numeric 0 (which is valid).
+                if val is None:
+                    continue
+                cell = ws.cell(row=current_row, column=ci, value=val)
                 cell.alignment = Alignment(vertical="center", wrap_text=True)
 
             current_row += 1
