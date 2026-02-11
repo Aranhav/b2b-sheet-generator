@@ -64,6 +64,22 @@ def _clear_token() -> None:
     _token_expires = 0
 
 
+def _hs_to_int(val: Any) -> int | None:
+    """Convert an HS/HTS code string to integer for Excel.
+
+    Xindus POI parser reads HS code columns as NUMERIC cells.
+    Returns None for empty/missing values (cell left blank).
+    """
+    if val is None or val == "":
+        return None
+    try:
+        # Strip dots/spaces, convert to int (drops leading zeros but
+        # Xindus stores HS codes as numbers internally anyway).
+        return int(str(val).replace(".", "").replace(" ", ""))
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_excel(shipment_data: dict[str, Any]) -> bytes:
     """Generate XpressB2B Excel for Xindus Express-Shipment API.
 
@@ -182,15 +198,17 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                 else:
                     row_data = [None] * box_col_count
 
-            # Item-level columns (same for both formats)
+            # Item-level columns (same for both formats).
+            # HS codes MUST be written as integers — Xindus POI parser
+            # calls getNumericCellValue() on those columns.
             row_data.extend([
-                item.get("description", ""),
+                item.get("description", "") or None,
                 item.get("quantity", 0),
-                item.get("weight", 0),
-                item.get("ehsn", ""),
-                item.get("ihsn", ""),
+                item.get("weight", 0) or None,
+                _hs_to_int(item.get("ehsn", "")),
+                _hs_to_int(item.get("ihsn", "")),
                 item.get("unitPrice", item.get("unit_price", 0)),
-                item.get("igst", item.get("igst_amount", 0)),
+                item.get("igst", item.get("igst_amount", 0)) or None,
             ])
 
             for ci, val in enumerate(row_data, start=1):
