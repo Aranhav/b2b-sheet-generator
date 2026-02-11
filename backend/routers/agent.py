@@ -777,8 +777,12 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
 
     # Determine success
     success = 200 <= http_status < 300
-    scancode = response_body.get("scancode") or response_body.get("data", {}).get("scancode") if success else None
-    label_b64 = response_body.get("label") or response_body.get("data", {}).get("label")
+    # Xindus wraps data in a list: {"data": [{"scancode": "..."}]}
+    raw_data = response_body.get("data")
+    data_obj = (raw_data[0] if isinstance(raw_data, list) and raw_data else
+                raw_data if isinstance(raw_data, dict) else {})
+    scancode = (response_body.get("scancode") or data_obj.get("scancode")) if success else None
+    label_b64 = response_body.get("label") or data_obj.get("label")
     error_desc = None
     error_code = None
     if not success:
