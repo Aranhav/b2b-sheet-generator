@@ -132,6 +132,33 @@ async def delete_file(key: str) -> None:
         logger.exception("S3 delete failed for key=%s", key)
 
 
+def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
+    """Generate a presigned URL for an S3 object (valid for expires_in seconds)."""
+    client = _get_client()
+    if client is None:
+        return ""
+    try:
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": S3_BUCKET, "Key": key},
+            ExpiresIn=expires_in,
+        )
+    except ClientError:
+        logger.exception("Failed to generate presigned URL for key=%s", key)
+        return ""
+
+
+def s3_key_from_url(file_url: str) -> str:
+    """Extract the S3 key from a full file URL."""
+    prefix = f"{S3_ENDPOINT}/{S3_BUCKET}/"
+    if file_url.startswith(prefix):
+        return file_url[len(prefix):]
+    # Fallback: try to extract after bucket name
+    if f"/{S3_BUCKET}/" in file_url:
+        return file_url.split(f"/{S3_BUCKET}/", 1)[1]
+    return ""
+
+
 async def file_exists(key: str) -> bool:
     """Check if a file exists in S3 (or local fallback)."""
     client = _get_client()

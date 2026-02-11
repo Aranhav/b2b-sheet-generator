@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import logging
 from typing import Any
 from uuid import UUID
@@ -748,6 +749,47 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
         raise HTTPException(404, "Draft not found")
 
     from backend.services.xindus_client import submit_b2b_shipment
+
+    # Inject documentsDTOS from draft files (Xindus requires at least one document)
+    try:
+        draft_files = await db.get_draft_files(draft_id)
+        documents_dtos = []
+        for f in draft_files:
+            file_type = f.get("file_type", "invoice") or "invoice"
+            doc_type = "invoice" if file_type == "invoice" else file_type
+            file_url = f.get("file_url", "")
+            # Generate presigned URL if we have an S3 file
+            if file_url:
+                from backend.storage import s3_key_from_url, generate_presigned_url
+                s3_key = s3_key_from_url(file_url)
+                if s3_key:
+                    file_url = generate_presigned_url(s3_key, expires_in=3600)
+            documents_dtos.append({
+                "id": int(time.time() * 1000) + len(documents_dtos),
+                "name": doc_type,
+                "type": doc_type,
+                "url": file_url,
+                "documentNumber": "",
+            })
+        # Ensure at least one invoice entry exists
+        if not documents_dtos:
+            documents_dtos.append({
+                "id": int(time.time() * 1000),
+                "name": "invoice",
+                "type": "invoice",
+                "url": "",
+                "documentNumber": "",
+            })
+        body.payload["documentsDTOS"] = documents_dtos
+    except Exception:
+        logger.warning("Failed to build documentsDTOS for draft %s, using empty", draft_id)
+        body.payload["documentsDTOS"] = [{
+            "id": int(time.time() * 1000),
+            "name": "invoice",
+            "type": "invoice",
+            "url": "",
+            "documentNumber": "",
+        }]
 
     # Create submission record
     submission_id = await db.create_submission(
