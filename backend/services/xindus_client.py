@@ -327,9 +327,12 @@ async def submit_b2b_shipment(
     json_payload = json.dumps(snake_data)
 
     # 3. Build URL
+    #    NOTE: consignor_id is only valid for FRANCHISEE-type accounts.
+    #    Our UAT user (prasanth.j@xindus.net) is DIRECT, so passing
+    #    consignor_id triggers "Customer type not franchisee" error.
+    #    For DIRECT accounts the shipment is created under the
+    #    authenticated user's customer — no consignor_id needed.
     url = f"{XINDUS_UAT_URL}/xos/api/express-shipment/create"
-    if consignor_id:
-        url += f"?consignor_id={consignor_id}"
 
     for attempt in range(2):
         token = await _authenticate()
