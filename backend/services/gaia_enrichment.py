@@ -37,6 +37,7 @@ from typing import Any
 from uuid import UUID
 
 from backend import db
+from backend.config import normalize_country_code
 from backend.services import gaia_client
 from backend.services.gaia_client import parse_duty_rate, calculate_cumulative_duty
 from backend.services.description_normalizer import normalize_description, llm_normalize_batch
@@ -446,12 +447,12 @@ async def classify_draft_items(draft_id: UUID) -> dict[str, Any] | None:
     # Determine destination country from receiver address
     receiver = sd.get("receiver_address") or {}
     dest_country = receiver.get("country") or "US"
-    dest_country = dest_country.strip().upper()[:2] if dest_country else "US"
+    dest_country = normalize_country_code(dest_country, "US")
 
     # Determine origin country from shipper address
     shipper = sd.get("shipper_address") or {}
     origin_country = shipper.get("country") or "IN"
-    origin_country = origin_country.strip().upper()[:2] if origin_country else "IN"
+    origin_country = normalize_country_code(origin_country, "IN")
 
     # Enrich
     enriched = await enrich_items_with_gaia(sd, dest_country, origin_country)

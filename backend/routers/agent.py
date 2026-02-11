@@ -27,7 +27,7 @@ from fastapi.responses import Response as FastAPIResponse
 from sse_starlette.sse import EventSourceResponse
 
 from backend import db, storage
-from backend.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB
+from backend.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, normalize_country_code
 from backend.models.agent import (
     ActiveBatch,
     ActiveBatchesResponse,
@@ -293,9 +293,9 @@ async def _run_extraction_pipeline(
                 from backend.services.gaia_enrichment import enrich_items_with_gaia
 
                 receiver = shipment_data.get("receiver_address") or {}
-                dest = (receiver.get("country") or "US").strip().upper()[:2]
+                dest = normalize_country_code(receiver.get("country") or "", "US")
                 shipper = shipment_data.get("shipper_address") or {}
-                origin = (shipper.get("country") or "IN").strip().upper()[:2]
+                origin = normalize_country_code(shipper.get("country") or "", "IN")
 
                 await _send_progress(job_id, batch_id, SSEProgress(
                     step="enriching",
@@ -917,8 +917,8 @@ async def tariff_lookup(body: dict):
     Returns duty breakdown with base rate, cumulative rate, and scenarios.
     """
     tariff_code = (body.get("tariff_code") or "").strip()
-    destination = (body.get("destination_country") or "US").strip().upper()[:2]
-    origin = (body.get("origin_country") or "IN").strip().upper()[:2]
+    destination = normalize_country_code(body.get("destination_country") or "", "US")
+    origin = normalize_country_code(body.get("origin_country") or "", "IN")
 
     if not tariff_code:
         raise HTTPException(400, "tariff_code is required")
