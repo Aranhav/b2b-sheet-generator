@@ -1273,7 +1273,9 @@ async def download_draft_excel(draft_id: UUID, format: str = "summary"):
     """Download the draft shipment data as an Excel workbook.
 
     Query params:
-        format: "summary" (default, 3-sheet overview) or "xpressb2b" (21-col upload sheet)
+        format: "summary" (default, 3-sheet overview),
+                "xpressb2b" (single-address 12-col upload sheet),
+                "xpressb2b-multi" (multi-address 21-col upload sheet)
     """
     from io import BytesIO
     from openpyxl import Workbook
@@ -1291,7 +1293,7 @@ async def download_draft_excel(draft_id: UUID, format: str = "summary"):
     inv = data.get("invoice_number", str(draft_id)[:8])
     safe_inv = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(inv))
 
-    # --- Shared styling ---
+    # --- Shared styling (for summary format) ---
     hdr_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
     hdr_font = Font(bold=True, color="FFFFFF", size=11)
     hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -1314,108 +1316,21 @@ async def download_draft_excel(draft_id: UUID, format: str = "summary"):
     boxes = data.get("shipment_boxes", []) or []
 
     # =====================================================================
-    # FORMAT: XpressB2B Multi Address (exact 21-column Xindus upload sheet)
+    # FORMAT: XpressB2B (single or multi address via _build_excel)
     # =====================================================================
-    if format == "xpressb2b":
-        COLUMNS = [
-            "Box Number",
-            "Receiver Name",
-            "Receiver Address",
-            "Receiver City",
-            "Receiver Zip",
-            "Receiver State",
-            "Receiver Country",
-            "Receiver Phone Number",
-            "Receiver Extension No",
-            "Receiver Email",
-            "Box Length (cms)",
-            "Box Width (cms)",
-            "Box Height (cms)",
-            "Box Weight (kgs)",
-            "Item Description",
-            "Item Qty",
-            "Item Unit Weight Kg",
-            "HS Code (Origin)",
-            "HS Code (Destination)",
-            "Item Unit Price",
-            "IGST % (For GST taxtype)",
-        ]
-        BOX_COL_COUNT = 14  # cols 1-14 are box-level (only on first item row)
+    if format in ("xpressb2b", "xpressb2b-multi"):
+        from backend.services.xindus_client import _build_excel
 
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "XpressB2B Multi Address"
+        is_multi = format == "xpressb2b-multi"
+        # Build a payload copy with the correct multi-address flag
+        excel_payload = {**data, "multiAddressDestinationDelivery": is_multi}
+        excel_bytes = _build_excel(excel_payload)
 
-        # Header row
-        for ci, h in enumerate(COLUMNS, start=1):
-            c = ws.cell(row=1, column=ci, value=h)
-            c.fill = hdr_fill
-            c.font = hdr_font
-            c.alignment = hdr_align
-            c.border = thin_border
-
-        # Fallback receiver from top-level
-        top_recv = data.get("receiver_address", {}) or {}
-
-        current_row = 2
-        for box in boxes:
-            items = box.get("shipment_box_items", []) or [{}]
-            recv = box.get("receiver_address", {}) or {}
-            # Use box receiver if it has a name, else fallback to top-level
-            if not recv.get("name"):
-                recv = top_recv
-
-            for j, item in enumerate(items):
-                is_first = j == 0
-
-                if is_first:
-                    row_data = [
-                        box.get("box_id", ""),
-                        recv.get("name", ""),
-                        recv.get("address", ""),
-                        recv.get("city", ""),
-                        recv.get("zip", ""),
-                        recv.get("state", ""),
-                        recv.get("country", ""),
-                        recv.get("phone", ""),
-                        recv.get("extension_number", ""),
-                        recv.get("email", ""),
-                        box.get("length", ""),
-                        box.get("width", ""),
-                        box.get("height", ""),
-                        box.get("weight", ""),
-                    ]
-                else:
-                    row_data = [""] * BOX_COL_COUNT
-
-                # Item-level columns (15-21)
-                row_data.extend([
-                    item.get("description", ""),
-                    item.get("quantity", ""),
-                    item.get("weight", ""),
-                    item.get("ehsn", ""),
-                    item.get("ihsn", ""),
-                    item.get("unit_price", ""),
-                    item.get("igst_amount", ""),
-                ])
-
-                for ci, val in enumerate(row_data, start=1):
-                    cell = ws.cell(row=current_row, column=ci, value=val if val else "")
-                    cell.border = thin_border
-                    cell.alignment = Alignment(vertical="center", wrap_text=True)
-
-                current_row += 1
-
-        _auto_fit(ws)
-        ws.freeze_panes = "A2"
-
-        buf = BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        filename = f"XpressB2B_{safe_inv}.xlsx"
+        suffix = "Multi" if is_multi else "Single"
+        filename = f"XpressB2B_{suffix}_{safe_inv}.xlsx"
 
         return FastAPIResponse(
-            content=buf.getvalue(),
+            content=excel_bytes,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
