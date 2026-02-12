@@ -14,7 +14,8 @@ from typing import Any
 
 import httpx
 from openpyxl import Workbook
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from backend.config import XINDUS_UAT_URL, XINDUS_UAT_USERNAME, XINDUS_UAT_PASSWORD
 
@@ -109,8 +110,8 @@ def _to_snake_keys(obj: Any) -> Any:
 def _build_excel(shipment_data: dict[str, Any]) -> bytes:
     """Generate XpressB2B Excel for Xindus Express-Shipment API.
 
-    Headers, sheet name, and layout must match the official Xindus
-    "FBA Split shipment" template exactly.
+    Headers, sheet name, styling, and layout match the official Xindus
+    "FBA Split shipment" template.
     - Single-address (multiAddressDestinationDelivery=false): 12 columns
     - Multi-address  (multiAddressDestinationDelivery=true):  21 columns
     First item row of each box has all box-level columns filled;
@@ -121,56 +122,72 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
     if not multi_addr:
         multi_addr = shipment_data.get("multi_address_destination_delivery", False)
 
-    # ── Column headers — must match Xindus template EXACTLY ──
+    # ── Styles matching the official Xindus template ──
+    hdr_font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+    hdr_fill_req = PatternFill("solid", fgColor="073763")   # dark blue (required)
+    hdr_fill_opt = PatternFill("solid", fgColor="6FA8DC")   # light blue (optional)
+    hdr_align = Alignment(horizontal="left", vertical="center")
+    hdr_align_center = Alignment(horizontal="center", vertical="center")
+    data_font = Font(name="Arial", size=10)
+    data_align = Alignment(vertical="center")
+
+    # ── Column definitions: (header, width, optional?) ──
     if multi_addr:
-        columns = [
-            "Box Number (R)",
-            "Receiver Name (R)",
-            "Receiver Address (R)",
-            "Receiver City (R)",
-            "Receiver Zip (R)",
-            "Receiver State (R)",
-            "Receiver Country (R)",
-            "Receiver Phone Number (R)",
-            "Receiver Extension No (O)",
-            "Receiver Email (R)",
-            "Box Length(cms)(R)",
-            "Box Width(cms)(R)",
-            "Box Height(cms)(R)",
-            "Box Weight(kgs)(R)",
-            "Item Description (R)",
-            "Item Qty (R)",
-            "Item Unit Weight Kg (O)",
-            "HS Code(Origin)(R)",
-            "HS Code(Destination) (O)",
-            "Item Unit Price (R)",
-            "IGST % (For GST taxtype)",
+        col_defs: list[tuple[str, float, bool]] = [
+            ("Box Number (R)",              15.0, False),
+            ("Receiver Name (R)",           17.5, False),
+            ("Receiver Address (R)",        28.0, False),
+            ("Receiver City (R)",           15.0, False),
+            ("Receiver Zip (R)",            12.0, False),
+            ("Receiver State (R)",          15.0, False),
+            ("Receiver Country (R)",        16.0, False),
+            ("Receiver Phone Number (R)",   22.0, False),
+            ("Receiver Extension No (O)",   22.0, True),
+            ("Receiver Email (R)",          20.0, False),
+            ("Box Length(cms)(R)",           18.0, False),
+            ("Box Width(cms)(R)",           17.0, False),
+            ("Box Height(cms)(R)",          18.0, False),
+            ("Box Weight(kgs)(R)",          18.0, False),
+            ("Item Description (R)",        25.0, False),
+            ("Item Qty (R)",                12.0, False),
+            ("Item Unit Weight Kg (O)",     22.0, True),
+            ("HS Code(Origin)(R)",          18.0, False),
+            ("HS Code(Destination) (O)",    22.0, True),
+            ("Item Unit Price (R)",         18.0, False),
+            ("IGST % (For GST taxtype)",    22.0, True),
         ]
         box_col_count = 14  # columns 1-14 are box-level
     else:
-        columns = [
-            "Box Number (R)",
-            "Box Length(cms)(R)",
-            "Box Width(cms)(R)",
-            "Box Height(cms)(R)",
-            "Box Weight(kgs)(R)",
-            "Item Description (R)",
-            "Item Qty (R)",
-            "Item Unit Weight Kg (O)",
-            "HS Code(Origin)(R)",
-            "HS Code(Destination) (O)",
-            "Item Unit Price (R)",
-            "IGST % (For GST taxtype)",
+        col_defs = [
+            ("Box Number (R)",              20.0, False),
+            ("Box Length(cms)(R)",           19.0, False),
+            ("Box Width(cms)(R)",           18.0, False),
+            ("Box Height(cms)(R)",          19.0, False),
+            ("Box Weight(kgs)(R)",          19.0, False),
+            ("Item Description (R)",        25.0, False),
+            ("Item Qty (R)",                12.0, False),
+            ("Item Unit Weight Kg (O)",     22.0, True),
+            ("HS Code(Origin)(R)",          18.0, False),
+            ("HS Code(Destination) (O)",    22.0, True),
+            ("Item Unit Price (R)",         18.0, False),
+            ("IGST % (For GST taxtype)",    22.0, True),
         ]
         box_col_count = 5  # columns 1-5 are box-level
+
+    columns = [d[0] for d in col_defs]
 
     wb = Workbook()
     ws = wb.active
     ws.title = "FBA Split shipment"
 
-    # Header row
-    for ci, h in enumerate(columns, start=1):
-        ws.cell(row=1, column=ci, value=h)
+    # ── Header row with Xindus styling ──
+    ws.row_dimensions[1].height = 16.5
+    for ci, (hdr, width, is_opt) in enumerate(col_defs, start=1):
+        cell = ws.cell(row=1, column=ci, value=hdr)
+        cell.font = hdr_font
+        cell.fill = hdr_fill_opt if is_opt else hdr_fill_req
+        cell.alignment = hdr_align_center if ci == 1 else hdr_align
+        ws.column_dimensions[get_column_letter(ci)].width = width
 
     # Fallback receiver from top-level
     top_recv = shipment_data.get("receiverAddress") or shipment_data.get("receiver_address") or {}
@@ -203,7 +220,7 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                         recv.get("state", ""),
                         recv.get("country", ""),
                         recv.get("phone", ""),
-                        recv.get("extensionNumber", recv.get("extension_number", "")),
+                        recv.get("extensionNumber", recv.get("extension_number", "")) or None,
                         recv.get("email", ""),
                         box.get("length", 0),
                         box.get("width", 0),
@@ -242,11 +259,10 @@ def _build_excel(shipment_data: dict[str, Any]) -> bytes:
                 if val is None:
                     continue
                 cell = ws.cell(row=current_row, column=ci, value=val)
-                cell.alignment = Alignment(vertical="center", wrap_text=True)
+                cell.font = data_font
+                cell.alignment = data_align
 
             current_row += 1
-
-    ws.freeze_panes = "A2"
 
     buf = BytesIO()
     wb.save(buf)
