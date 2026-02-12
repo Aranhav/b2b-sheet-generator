@@ -429,10 +429,29 @@ async def submit_b2b_shipment(
 
 # ── Partner API helpers ──────────────────────────────────────────────
 
+def _ensure_two_word_name(name: str) -> str:
+    """Partner API requires names with at least two words
+    (one with 2+ chars, another with 3+ chars).
+
+    If the name is a single word (e.g. "WALMART"), append "INC"
+    so it satisfies the validation ("WALMART INC").
+    """
+    name = name.strip()
+    parts = [p for p in name.split() if p]
+    if len(parts) < 2:
+        return f"{name} INC"
+    # Also check the character-length rule
+    has_2 = any(len(p) >= 2 for p in parts)
+    has_3 = any(len(p) >= 3 for p in parts)
+    if not (has_2 and has_3):
+        return f"{name} INC"
+    return name
+
+
 def _partner_address(addr: dict[str, Any]) -> dict[str, Any]:
     """Map internal address to Partner API format."""
     return {
-        "name": addr.get("name", ""),
+        "name": _ensure_two_word_name(addr.get("name", "") or ""),
         "email": addr.get("email", ""),
         "phone": addr.get("phone", ""),
         "address": addr.get("address", ""),
