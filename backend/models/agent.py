@@ -163,6 +163,7 @@ class SubmitToXindusRequest(BaseModel):
     """Body for POST /api/agent/drafts/{draft_id}/submit-xindus."""
     payload: dict[str, Any]
     consignor_id: Optional[int] = None
+    method: str = "express"  # "express" (2-step multipart) or "partner" (single JSON)
 
 
 class SubmissionResult(BaseModel):

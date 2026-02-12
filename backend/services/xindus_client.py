@@ -425,3 +425,130 @@ async def submit_b2b_shipment(
         return resp.status_code, body
 
     return 500, {"error": "Failed after retry"}
+
+
+# ── Partner API helpers ──────────────────────────────────────────────
+
+def _partner_address(addr: dict[str, Any]) -> dict[str, Any]:
+    """Map internal address to Partner API format."""
+    return {
+        "name": addr.get("name", ""),
+        "email": addr.get("email", ""),
+        "phone": addr.get("phone", ""),
+        "address": addr.get("address", ""),
+        "city": addr.get("city", ""),
+        "state": addr.get("state", ""),
+        "zip": addr.get("zip", ""),
+        "country": addr.get("country", ""),
+        "extension_number": addr.get("extension_number", ""),
+    }
+
+
+def _partner_boxes(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map internal boxes to Partner API format."""
+    result = []
+    for i, box in enumerate(boxes):
+        partner_items = []
+        for item in box.get("shipment_box_items", []):
+            partner_items.append({
+                "name": item.get("description", ""),
+                "description": item.get("description", ""),
+                "sku": item.get("sku") or f"ITEM-{i + 1}-{len(partner_items) + 1}",
+                "ehsn": _normalize_hs(item.get("ehsn")) or "",
+                "ihsn": _normalize_hs(item.get("ihsn")) or "",
+                "duty_rate": str(item.get("duty_rate", 0)),
+                "quantity": str(item.get("quantity", 1)),
+                "unit_weight": str(item.get("weight", 0) or item.get("unit_weight", 0)),
+                "unit_price": str(item.get("unit_price", 0)),
+                "igst_rate": str(item.get("igst_amount", 0) or item.get("igst_rate", 0)),
+                "unit_fob_value": str(item.get("unit_fob_value", 0) or item.get("fob_value", 0)),
+                "country_of_origin": item.get("country_of_origin", "IN"),
+            })
+        result.append({
+            "box_id": str(i + 1),
+            "weight": str(box.get("weight", 0)),
+            "width": str(box.get("width", 0)),
+            "length": str(box.get("length", 0)),
+            "height": str(box.get("height", 0)),
+            "shipment_box_items": partner_items,
+        })
+    return result
+
+
+async def submit_b2b_partner(
+    shipment_data: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    """Submit a B2B shipment via the Xindus Partner API.
+
+    Single-step JSON API: POST /xos/api/partner/shipment
+    Simpler than the 2-step Express-Shipment flow — no Excel needed.
+    Returns (http_status, response_body).
+    """
+    snake_data = _to_snake_keys(shipment_data)
+
+    payload: dict[str, Any] = {
+        "shipment_config": {
+            "shipping_method": snake_data.get("shipping_method", "AN"),
+            "terms_of_trade": snake_data.get("terms_of_trade", "DDP"),
+            "tax_type": snake_data.get("tax_type", "GST"),
+            "service": "Commercial",
+            "purpose": snake_data.get("purpose_of_booking", "Sold"),
+            "market_place": snake_data.get("marketplace", "other"),
+            "use_provided_hsn": True,
+            "use_provided_duty_rate": True,
+            "use_provided_fob": True,
+            "ready_to_ship": False,
+            "auto_generate_invoice": False,
+            "auto_deduct_payment": True,
+            "auto_generate_label": True,
+            "avail_xindus_assure": False,
+            "pga_items_included": False,
+        },
+        "order_reference_number": (
+            snake_data.get("export_reference")
+            or snake_data.get("shipment_references")
+            or snake_data.get("invoice_number", "")
+        ),
+        "invoice_number": snake_data.get("invoice_number", ""),
+        "invoice_date": snake_data.get("invoice_date", ""),
+        "shipping_currency": snake_data.get("shipping_currency", "INR"),
+        "freight_charges": "0",
+        "insurance_charges": "0",
+        "shipper_address": _partner_address(snake_data.get("shipper_address") or {}),
+        "receiver_address": _partner_address(snake_data.get("receiver_address") or {}),
+        "billing_address": _partner_address(snake_data.get("billing_address") or {}),
+        "shipment_boxes": _partner_boxes(snake_data.get("shipment_boxes") or []),
+    }
+
+    # Include base64 documents if provided
+    docs = snake_data.get("documents")
+    if docs:
+        payload["documents"] = docs
+
+    url = f"{XINDUS_UAT_URL}/xos/api/partner/shipment"
+
+    for attempt in range(2):
+        token = await _authenticate()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+        if resp.status_code == 401 and attempt == 0:
+            logger.warning("Xindus Partner API returned 401, refreshing token")
+            _clear_token()
+            continue
+
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw_response": resp.text[:2000]}
+
+        logger.info("Xindus Partner API response: %d %s",
+                     resp.status_code, str(body)[:300])
+        return resp.status_code, body
+
+    return 500, {"error": "Failed after retry"}

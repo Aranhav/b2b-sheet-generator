@@ -671,8 +671,14 @@ async def get_all_drafts(
     arg_idx = 1
 
     if status:
-        conditions.append(f"ds.status = ${arg_idx}")
-        args.append(status)
+        # Support comma-separated status values (e.g. "approved,pushed")
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        if len(statuses) > 1:
+            conditions.append(f"ds.status = ANY(${arg_idx})")
+            args.append(statuses)
+        else:
+            conditions.append(f"ds.status = ${arg_idx}")
+            args.append(statuses[0])
         arg_idx += 1
     elif exclude_status:
         conditions.append(f"ds.status != ${arg_idx}")

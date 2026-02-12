@@ -749,8 +749,10 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
     if not draft:
         raise HTTPException(404, "Draft not found")
 
-    from backend.services.xindus_client import submit_b2b_shipment, upload_document
+    from backend.services.xindus_client import submit_b2b_shipment, submit_b2b_partner, upload_document
     from backend.storage import s3_key_from_url, download_file as s3_download
+
+    use_partner = body.method == "partner"
 
     # Upload draft files to Xindus CDN and build "documents" array.
     # Key MUST be "documents" (Xindus @JsonProperty("documents")).
@@ -826,17 +828,19 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
             "document_number": "",
         })
 
-    # Fail early if no documents could be uploaded
-    if not documents:
-        msg = "Could not download files from storage to upload to Xindus."
-        if failed_files:
-            msg += f" Failed files: {', '.join(failed_files)}"
-        msg += " The storage service may be temporarily unavailable — please try again in a few minutes."
-        logger.error(msg)
-        raise HTTPException(503, msg)
+    # For Express-Shipment, fail early if no documents could be uploaded
+    # Partner API doesn't require CDN-uploaded documents
+    if not use_partner:
+        if not documents:
+            msg = "Could not download files from storage to upload to Xindus."
+            if failed_files:
+                msg += f" Failed files: {', '.join(failed_files)}"
+            msg += " The storage service may be temporarily unavailable — please try again in a few minutes."
+            logger.error(msg)
+            raise HTTPException(503, msg)
 
-    body.payload["documents"] = documents
-    body.payload["invoiceHavePacking"] = not packing_uploaded
+        body.payload["documents"] = documents
+        body.payload["invoiceHavePacking"] = not packing_uploaded
 
     # Create submission record
     submission_id = await db.create_submission(
@@ -846,9 +850,12 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
     )
 
     try:
-        http_status, response_body = await submit_b2b_shipment(
-            body.payload, body.consignor_id,
-        )
+        if use_partner:
+            http_status, response_body = await submit_b2b_partner(body.payload)
+        else:
+            http_status, response_body = await submit_b2b_shipment(
+                body.payload, body.consignor_id,
+            )
     except Exception as exc:
         logger.exception("Xindus submission failed for draft %s", draft_id)
         await db.update_submission_result(
@@ -866,12 +873,23 @@ async def submit_to_xindus(draft_id: UUID, body: SubmitToXindusRequest):
 
     # Determine success
     success = 200 <= http_status < 300
-    # Xindus wraps data in a list: {"data": [{"scancode": "..."}]}
-    raw_data = response_body.get("data")
-    data_obj = (raw_data[0] if isinstance(raw_data, list) and raw_data else
-                raw_data if isinstance(raw_data, dict) else {})
-    scancode = (response_body.get("scancode") or data_obj.get("scancode")) if success else None
-    label_b64 = response_body.get("label") or data_obj.get("label")
+
+    if use_partner:
+        # Partner API response: {"shipment_id": "...", "shipment_boxes": [{"scancode": "..."}]}
+        scancode = response_body.get("shipment_id") if success else None
+        if not scancode and success:
+            boxes = response_body.get("shipment_boxes", [])
+            if boxes and isinstance(boxes, list):
+                scancode = boxes[0].get("scancode")
+    else:
+        # Express-Shipment wraps data in a list: {"data": [{"scancode": "..."}]}
+        raw_data = response_body.get("data")
+        data_obj = (raw_data[0] if isinstance(raw_data, list) and raw_data else
+                    raw_data if isinstance(raw_data, dict) else {})
+        scancode = (response_body.get("scancode") or data_obj.get("scancode")) if success else None
+    label_b64 = response_body.get("label")
+    if not label_b64 and not use_partner:
+        label_b64 = data_obj.get("label")
     error_desc = None
     error_code = None
     if not success:
