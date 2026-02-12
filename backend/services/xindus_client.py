@@ -461,7 +461,11 @@ def _partner_boxes(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "unit_weight": str(item.get("weight", 0) or item.get("unit_weight", 0)),
                 "unit_price": str(item.get("unit_price", 0)),
                 "igst_rate": str(item.get("igst_amount", 0) or item.get("igst_rate", 0)),
-                "unit_fob_value": str(item.get("unit_fob_value", 0) or item.get("fob_value", 0)),
+                "unit_fob_value": str(
+                    item.get("unit_fob_value", 0)
+                    or item.get("fob_value", 0)
+                    or item.get("unit_price", 0)
+                ),
                 "country_of_origin": item.get("country_of_origin", "IN"),
             })
         result.append({
