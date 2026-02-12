@@ -2,11 +2,12 @@
 
 Endpoints
 ---------
-GET /api/download/{job_id}/multi           -- XpressB2B Multi Address Excel sheet.
-GET /api/download/{job_id}/simplified      -- Simplified Template Excel sheet.
-GET /api/download/{job_id}/result          -- Raw extraction result as JSON.
-GET /api/download/{job_id}/xindus_single   -- Xindus single-address (12 col) sheet.
-GET /api/download/{job_id}/xindus_multi    -- Xindus multi-address (21 col) sheet.
+GET  /api/download/{job_id}/multi           -- XpressB2B Multi Address Excel sheet.
+GET  /api/download/{job_id}/simplified      -- Simplified Template Excel sheet.
+GET  /api/download/{job_id}/result          -- Raw extraction result as JSON.
+GET  /api/download/{job_id}/xindus_single   -- Xindus single-address (12 col) sheet.
+GET  /api/download/{job_id}/xindus_multi    -- Xindus multi-address (21 col) sheet.
+POST /api/download/generate-xindus          -- Generate Xindus Excel from extraction JSON.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from backend.config import UPLOAD_DIR
@@ -260,7 +261,7 @@ async def download_xindus_multi(job_id: str) -> Response:
 
 
 async def _xindus_download(job_id: str, multi_address: bool) -> Response:
-    """Generate Xindus-format Excel on-the-fly from extraction result."""
+    """Generate Xindus-format Excel on-the-fly from extraction result on disk."""
     from backend.services.xindus_client import _build_excel
 
     job_dir = os.path.join(UPLOAD_DIR, job_id)
@@ -279,6 +280,40 @@ async def _xindus_download(job_id: str, multi_address: bool) -> Response:
 
     suffix = "Multi" if multi_address else "Single"
     filename = f"Xindus_{suffix}_{job_id[:8]}.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST endpoint — generate Xindus Excel from extraction JSON (no filesystem)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/download/generate-xindus")
+async def generate_xindus_excel(
+    request: Request,
+    format: str = Query("single", regex="^(single|multi)$"),
+) -> Response:
+    """Generate Xindus-format Excel from POSTed extraction result JSON.
+
+    Unlike the GET endpoints above, this does NOT depend on the job
+    existing on disk — the caller sends the full extraction result in
+    the request body.  This makes it resilient to Railway redeploys.
+    """
+    from backend.services.xindus_client import _build_excel
+
+    body = await request.json()
+    result = body.get("extraction_result") or body
+    multi_address = format == "multi"
+
+    shipment_data = _extraction_to_shipment_data(result, multi_address)
+    excel_bytes = _build_excel(shipment_data)
+
+    suffix = "Multi" if multi_address else "Single"
+    filename = f"Xindus_{suffix}_Address.xlsx"
 
     return Response(
         content=excel_bytes,
