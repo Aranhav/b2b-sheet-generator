@@ -165,8 +165,39 @@ def _extraction_to_shipment_data(result: dict, multi_address: bool) -> dict:
     # Use ship_to as receiver if it has data, else consignee
     recv = ship_to if _cv(ship_to.get("name", "")) else consignee
 
-    # Build line items lookup for matching
+    # Build line items lookup for enriching packing list items
     line_items = invoice.get("line_items", [])
+
+    # Index invoice line items by normalized description for cross-referencing
+    def _norm(s: str) -> str:
+        return " ".join(s.lower().split())
+
+    invoice_by_desc: dict[str, dict] = {}
+    for li in line_items:
+        desc = _norm(_cv(li.get("description", "")))
+        if desc:
+            invoice_by_desc[desc] = li
+
+    def _find_invoice_match(box_desc: str) -> dict | None:
+        """Find matching invoice line item by description (exact then substring)."""
+        nd = _norm(box_desc)
+        if not nd:
+            return None
+        # Exact match
+        if nd in invoice_by_desc:
+            return invoice_by_desc[nd]
+        # Substring match (box desc in invoice desc or vice versa)
+        for inv_desc, li in invoice_by_desc.items():
+            if nd in inv_desc or inv_desc in nd:
+                return li
+        # Word overlap match (>50% of words overlap)
+        nd_words = set(nd.split())
+        for inv_desc, li in invoice_by_desc.items():
+            inv_words = set(inv_desc.split())
+            overlap = nd_words & inv_words
+            if len(overlap) >= max(1, min(len(nd_words), len(inv_words)) * 0.5):
+                return li
+        return None
 
     # Build shipment boxes
     boxes_data = packing.get("boxes", [])
@@ -179,14 +210,39 @@ def _extraction_to_shipment_data(result: dict, multi_address: bool) -> dict:
         items = []
         if box_items_raw:
             for bi in box_items_raw:
+                desc = _cv(bi.get("description", ""))
+                ehsn = _cv(bi.get("hs_code_origin", ""))
+                ihsn = _cv(bi.get("hs_code_destination", ""))
+                unit_price = _cv(bi.get("unit_price_usd", 0))
+                weight = _cv(bi.get("unit_weight_kg", 0))
+                igst = _cv(bi.get("igst_percent", 0))
+
+                # Enrich from invoice if packing list item is missing data
+                if not ehsn or ehsn == "0":
+                    match = _find_invoice_match(desc)
+                    # Fallback: if only 1 invoice line item, use it
+                    if not match and len(line_items) == 1:
+                        match = line_items[0]
+                    if match:
+                        if not ehsn or ehsn == "0":
+                            ehsn = _cv(match.get("hs_code_origin", ""))
+                        if not ihsn or ihsn == "0":
+                            ihsn = _cv(match.get("hs_code_destination", ""))
+                        if not unit_price or unit_price == "0":
+                            unit_price = _cv(match.get("unit_price_usd", 0))
+                        if not weight or weight == "0":
+                            weight = _cv(match.get("unit_weight_kg", 0))
+                        if not igst or igst == "0":
+                            igst = _cv(match.get("igst_percent", 0))
+
                 items.append({
-                    "description": _cv(bi.get("description", "")),
+                    "description": desc,
                     "quantity": _cv(bi.get("quantity", 1)),
-                    "weight": _cv(bi.get("unit_weight_kg", 0)),
-                    "ehsn": _cv(bi.get("hs_code_origin", "")),
-                    "ihsn": _cv(bi.get("hs_code_destination", "")),
-                    "unit_price": _cv(bi.get("unit_price_usd", 0)),
-                    "igst_amount": _cv(bi.get("igst_percent", 0)),
+                    "weight": weight,
+                    "ehsn": ehsn,
+                    "ihsn": ihsn,
+                    "unit_price": unit_price,
+                    "igst_amount": igst,
                 })
         else:
             # No box items — use all line items
