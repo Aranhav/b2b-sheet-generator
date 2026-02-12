@@ -352,6 +352,7 @@ async def _xindus_download(job_id: str, multi_address: bool) -> Response:
 async def generate_xindus_excel(
     request: Request,
     format: str = Query("single", regex="^(single|multi)$"),
+    fill_optional: str = Query("false"),
 ) -> Response:
     """Generate Xindus-format Excel from POSTed extraction result JSON.
 
@@ -366,6 +367,15 @@ async def generate_xindus_excel(
     multi_address = format == "multi"
 
     shipment_data = _extraction_to_shipment_data(result, multi_address)
+
+    # Strip optional fields (weight, dest HSN, IGST) unless explicitly requested
+    if fill_optional.lower() != "true":
+        for box in shipment_data.get("shipment_boxes", []):
+            for item in box.get("shipment_box_items", []):
+                item["weight"] = ""
+                item["ihsn"] = ""
+                item["igst_amount"] = ""
+
     excel_bytes = _build_excel(shipment_data)
 
     suffix = "Multi" if multi_address else "Single"
