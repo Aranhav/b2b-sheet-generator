@@ -487,6 +487,13 @@ def _compute_overall_confidence(result: ExtractionResult) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _extended_output_headers(max_tokens: int) -> dict[str, str]:
+    """Return extra headers needed for extended output (>16K tokens)."""
+    if max_tokens > 16384:
+        return {"anthropic-beta": "interleaved-thinking-2025-05-14,output-128k-2025-02-19"}
+    return {}
+
+
 def _call_llm(
     model: str,
     system_prompt: str,
@@ -499,8 +506,56 @@ def _call_llm(
         max_tokens=max_tokens,
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
+        extra_headers=_extended_output_headers(max_tokens),
     )
     return response.content[0].text
+
+
+def _call_llm_with_stop(
+    model: str,
+    system_prompt: str,
+    user_content: str | list[dict[str, Any]],
+    max_tokens: int,
+) -> tuple[str, str]:
+    """LLM call that also returns the stop_reason."""
+    response = _client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+        extra_headers=_extended_output_headers(max_tokens),
+    )
+    return response.content[0].text, response.stop_reason
+
+
+def _call_continuation(
+    model: str,
+    system_prompt: str,
+    original_message: str | list[dict[str, Any]],
+    partial_response: str,
+    max_tokens: int,
+) -> tuple[str, str]:
+    """Continue a truncated LLM response from where it stopped."""
+    messages = [
+        {"role": "user", "content": original_message},
+        {"role": "assistant", "content": partial_response},
+        {
+            "role": "user",
+            "content": (
+                "Your JSON response was cut off. Continue the JSON from EXACTLY "
+                "where you stopped. Output ONLY the remaining JSON text — do NOT "
+                "repeat any part of the response you already gave."
+            ),
+        },
+    ]
+    response = _client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=messages,
+        extra_headers=_extended_output_headers(max_tokens),
+    )
+    return response.content[0].text, response.stop_reason
 
 
 def _call_retry(
@@ -523,6 +578,7 @@ def _call_retry(
         max_tokens=max_tokens,
         system=system_prompt,
         messages=messages,
+        extra_headers=_extended_output_headers(max_tokens),
     )
     return response.content[0].text
 
@@ -575,7 +631,12 @@ async def _extract_packing_list(
     is_vision: bool,
     correction_hints: str = "",
 ) -> dict[str, Any]:
-    """Call 2: Extract packing list data (destinations + all boxes, flat schema)."""
+    """Call 2: Extract packing list data (destinations + all boxes, flat schema).
+
+    Uses extended output tokens and automatic continuation when the response
+    is truncated (stop_reason == "max_tokens") to handle large packing lists
+    with many individual boxes.
+    """
     loop = asyncio.get_running_loop()
 
     # Packing list always uses the higher-capacity model
@@ -592,11 +653,36 @@ async def _extract_packing_list(
     if correction_hints:
         system_prompt += f"\n\nCommon corrections to watch for:\n{correction_hints}"
 
-    raw_response = await loop.run_in_executor(
+    raw_response, stop_reason = await loop.run_in_executor(
         None,
-        partial(_call_llm, model, system_prompt, user_content, LLM_MAX_TOKENS_PACKING_LIST),
+        partial(_call_llm_with_stop, model, system_prompt, user_content, LLM_MAX_TOKENS_PACKING_LIST),
     )
-    logger.info("Packing list LLM response: %d chars from %s", len(raw_response), model)
+    logger.info(
+        "Packing list LLM response: %d chars from %s (stop=%s)",
+        len(raw_response), model, stop_reason,
+    )
+
+    # Handle truncation — continue until the response is complete
+    max_continuations = 3
+    continuation_count = 0
+    while stop_reason == "max_tokens" and continuation_count < max_continuations:
+        continuation_count += 1
+        logger.warning(
+            "Packing list response truncated (max_tokens), requesting continuation %d/%d",
+            continuation_count, max_continuations,
+        )
+        cont_text, stop_reason = await loop.run_in_executor(
+            None,
+            partial(
+                _call_continuation, model, system_prompt, user_content,
+                raw_response, LLM_MAX_TOKENS_PACKING_LIST,
+            ),
+        )
+        raw_response += cont_text
+        logger.info(
+            "Continuation %d: +%d chars, total=%d chars (stop=%s)",
+            continuation_count, len(cont_text), len(raw_response), stop_reason,
+        )
 
     try:
         return _extract_json_from_response(raw_response)
