@@ -11,6 +11,7 @@ POST /api/jobs/{job_id}/update -- Patch a single extracted field after human rev
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -275,6 +276,26 @@ def _set_nested_value(obj: Any, path_parts: list[str], value: Any) -> None:
         raise ValueError(f"Cannot set attribute '{leaf}' on {type(current).__name__}")
 
 
+CACHE_DIR = os.path.join(UPLOAD_DIR, "_cache")
+
+
+def _compute_cache_key(
+    file_data: list[tuple[str, bytes]],
+    sync_hs_codes: str,
+    output_currency: str,
+    exchange_rate: str,
+) -> str:
+    """Compute a deterministic cache key from file contents and options."""
+    h = hashlib.sha256()
+    for name, content in sorted(file_data, key=lambda x: x[0]):
+        h.update(name.encode())
+        h.update(content)
+    h.update(f"sync_hs_codes={sync_hs_codes}".encode())
+    h.update(f"output_currency={output_currency}".encode())
+    h.update(f"exchange_rate={exchange_rate}".encode())
+    return h.hexdigest()
+
+
 async def _save_json(path: str, data: dict) -> None:
     """Write a dict as formatted JSON to disk."""
     async with aiofiles.open(path, "w", encoding="utf-8") as f:
@@ -400,6 +421,40 @@ async def extract_from_pdfs(
         file_data.append((safe_name, contents))
         logger.info("Saved input file: %s (%d bytes)", safe_name, len(contents))
 
+    # ---- 3b. Check cache ----
+    cache_key = _compute_cache_key(file_data, sync_hs_codes, output_currency, exchange_rate)
+    cache_path = os.path.join(CACHE_DIR, f"{cache_key}.json")
+
+    if os.path.isfile(cache_path):
+        logger.info("Cache HIT for job %s (key=%s)", job_id, cache_key[:12])
+        try:
+            cached_data = await _load_json(cache_path)
+            extraction_result = ExtractionResult(**cached_data)
+            extraction_result.job_id = job_id
+
+            # Generate output files for this job
+            try:
+                await asyncio.to_thread(_generate_outputs, extraction_result, job_dir)
+            except Exception:
+                logger.exception("Excel generation failed for cached job %s", job_id)
+
+            result_path = os.path.join(job_dir, "extraction_result.json")
+            await _save_json(result_path, extraction_result.model_dump())
+
+            return JobStatus(
+                job_id=job_id,
+                status=extraction_result.status,
+                progress=100,
+                message="Extraction complete (cached).",
+                result=extraction_result,
+                multi_address_download=f"/api/download/{job_id}/multi",
+                simplified_download=f"/api/download/{job_id}/simplified",
+            )
+        except Exception:
+            logger.warning("Cache file corrupted for key %s, re-extracting", cache_key[:12])
+
+    logger.info("Cache MISS for job %s (key=%s)", job_id, cache_key[:12])
+
     # ---- 4. Extract text/tables from each PDF ----
     all_pages: list[dict[str, Any]] = []
     for filename, pdf_bytes in file_data:
@@ -464,6 +519,14 @@ async def extract_from_pdfs(
         len(extraction_result.warnings),
         len(extraction_result.errors),
     )
+
+    # ---- 7b. Save to cache ----
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        await _save_json(cache_path, extraction_result.model_dump())
+        logger.info("Cached extraction result (key=%s)", cache_key[:12])
+    except Exception:
+        logger.warning("Failed to write cache for key %s", cache_key[:12])
 
     # ---- 8. Generate output Excel files ----
     try:
